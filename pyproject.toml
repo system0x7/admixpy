@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "admixpy"
+version = "0.1.0"
+description = "Fast Python implementation of ADMIXTOOLS-style f-statistics, qpadm, and qpwave"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+]
+
+[tool.setuptools.packages.find]
+include = ["admixpy*"]
