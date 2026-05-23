@@ -41,6 +41,9 @@ python -m pip install -r requirements.txt
 Supported input formats include EIGENSTRAT (`.geno/.snp/.ind`), packed
 AncestryMap (`.geno/.snp/.ind`), TGENO (`.tgeno/.snp/.ind`), and SNP-major PLINK
 binary files (`.bed/.bim/.fam`).
+For fastest repeated f-statistic workloads, prefer SNP-major binary formats such
+as packed AncestryMap or PLINK `.bed/.bim/.fam`; TGENO is supported, but its
+sample-major layout is usually less efficient for SNP-block scans.
 TGENO conversion streams samples by default for speed; use `tgeno_chunked=True`
 with `anygeno_to_afs`, `f2_from_geno`, or `f4_stats_from_geno` to opt into
 lower-memory SNP chunking.
