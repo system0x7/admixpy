@@ -494,8 +494,11 @@ def _as_pop_list(x) -> list[str]:
     return list(x)
 
 
-def _default_qpadm_allsnps(data) -> bool:
+def _default_genotype_allsnps(data) -> bool:
     return isinstance(data, (str, Path)) and not Path(data).is_dir()
+
+
+_ALLSNPS_DIRECT_ERROR = "allsnps=True is only available when reading directly from genotype files"
 
 
 def _require_unique_pops(pops: Sequence[str], name: str) -> None:
@@ -528,11 +531,15 @@ def _model_left_with_target(row) -> list[str]:
 
 
 def f4_model_cache(data, models, verbose: bool = True, **kwargs) -> F4ModelCache | F4BlockCache:
+    allsnps = bool(kwargs.pop("allsnps", False))
     if isinstance(data, F4ModelCache):
+        if allsnps:
+            raise ValueError(_ALLSNPS_DIRECT_ERROR)
         return data
     if isinstance(data, F4BlockCache):
+        if allsnps:
+            raise ValueError(_ALLSNPS_DIRECT_ERROR)
         return data
-    allsnps = bool(kwargs.pop("allsnps", False))
     models = _models_frame(models)
     left_pops = []
     right_pops = []
@@ -1054,6 +1061,8 @@ def f4_stats(
     combos = _f4_combinations(pop1, pop2, pop3, pop4, comb)
     if unique_only:
         combos = combos.drop_duplicates().reset_index(drop=True)
+    if allsnps and isinstance(data, F4BlockCache):
+        raise ValueError(_ALLSNPS_DIRECT_ERROR)
     if isinstance(data, F4BlockCache):
         key = ["pop1", "pop2", "pop3", "pop4"]
         cached = data.stats
@@ -1076,7 +1085,7 @@ def f4_stats(
         return BlockStats(rows=combos, blocks=blocks, block_lengths=cached.block_lengths.copy(), stat="f4", loo=loo, est=est, cov=cov)
     if allsnps:
         if isinstance(data, (F2Blocks, F4ModelCache)) or (isinstance(data, (str, Path)) and Path(data).is_dir()):
-            raise ValueError("allsnps=True is only available when reading directly from genotype files")
+            raise ValueError(_ALLSNPS_DIRECT_ERROR)
         stats = f4_stats_from_geno(data, combos, allsnps=True, verbose=verbose, **kwargs)
         if not keep_blocks:
             stats.blocks = None
@@ -1122,6 +1131,8 @@ def qpdstat(
     verbose: bool = True,
     **kwargs,
 ) -> pd.DataFrame:
+    if "allsnps" not in kwargs:
+        kwargs["allsnps"] = _default_genotype_allsnps(data)
     stats = f4_stats(
         data,
         pop1,
@@ -1183,6 +1194,8 @@ def qpwave_f4stats(
     verbose: bool = True,
     **kwargs,
 ) -> QpWaveStats:
+    if "allsnps" not in kwargs:
+        kwargs["allsnps"] = _default_genotype_allsnps(data)
     left = list(left)
     right = list(right)
     left_base, row_pops = _contrast_pops(left, left_base, "left")
@@ -1330,6 +1343,8 @@ def qpwave_multi(
     **kwargs,
 ) -> pd.DataFrame:
     models = _models_frame(models)
+    if "allsnps" not in kwargs:
+        kwargs["allsnps"] = _default_genotype_allsnps(data)
     source = f4_model_cache(data, models, verbose=verbose, **kwargs) if use_cache else data
     qp_kwargs = {} if use_cache else kwargs
     rows = []
@@ -1612,7 +1627,7 @@ def qpadm(
     if len(right) < 1:
         raise ValueError("At least one right/reference population is required")
     if "allsnps" not in kwargs:
-        kwargs["allsnps"] = _default_qpadm_allsnps(data)
+        kwargs["allsnps"] = _default_genotype_allsnps(data)
     left_full = [target] + [p for p in sources if p != target]
     qpw = qpwave_f4stats(data, left=left_full, right=right, verbose=verbose, **kwargs)
     xmat = qpw.matrix
@@ -1664,7 +1679,7 @@ def qpadm_multi(
             raise ValueError(f"Model {model_i}: {err}") from None
     qpadm_keys = {"fudge", "fudge_twice", "iterations", "getcov", "return_f4", "return_stats", "return_cov"}
     if "allsnps" not in kwargs:
-        kwargs["allsnps"] = _default_qpadm_allsnps(data)
+        kwargs["allsnps"] = _default_genotype_allsnps(data)
     qpadm_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in qpadm_keys}
     source = f4_model_cache(data, models, verbose=verbose, **kwargs) if use_cache else data
     qp_kwargs = qpadm_kwargs if use_cache else {**kwargs, **qpadm_kwargs}

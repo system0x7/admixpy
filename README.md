@@ -53,8 +53,8 @@ The main convenience wrappers are:
 admixpy.f2(data, pop1=None, pop2=None, **kwargs)
 admixpy.fst(data, pop1=None, pop2=None, **kwargs)
 admixpy.f3(data, pop1, pop2, pop3, **kwargs)
-admixpy.f4(data, pop1, pop2, pop3, pop4, **kwargs)
-admixpy.qpwave(data, left, right, ranks=None, **kwargs)
+admixpy.f4(data, pop1, pop2, pop3, pop4, allsnps=True, **kwargs)
+admixpy.qpwave(data, left, right, ranks=None, allsnps=True, **kwargs)
 admixpy.qpadm(data, target, left, right, allsnps=True, **kwargs)
 ```
 
@@ -63,10 +63,11 @@ Population arguments can be strings or lists where the wrapper supports multiple
 combinations. For PLINK `.bed/.bim/.fam` input, population labels are read from
 the FID column of the `.fam` file.
 
-For direct genotype input, `qpadm` defaults to `allsnps=True`, matching the
-ADMIXTOOLS1-style behavior of estimating each f4 statistic from its available
-SNPs. Use `allsnps=False` to restrict the model to SNPs shared across the
-required populations. Precomputed f2 input keeps the standard f2-based behavior.
+For direct genotype input, `f4`, `qpwave`, and `qpadm` default to
+`allsnps=True`, matching the ADMIXTOOLS1-style behavior of estimating each f4
+statistic from its available SNPs. Use `allsnps=False` to restrict the model to
+SNPs shared across the required populations. Precomputed f2 input keeps the
+standard f2-based behavior.
 
 Lower-level helpers are also exported for direct use, including allele-frequency
 conversion (`anygeno_to_afs`, `eigenstrat_to_afs`, `plink_to_afs`,
