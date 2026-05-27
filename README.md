@@ -2,7 +2,7 @@
 
 Fast Python implementation of ADMIXTOOLS-style f-statistics, qpAdm, and qpWave.
 
-> Runs faster than ADMIXTOOLS 2 on equivalent workloads.
+> Fast f-statistics, qpAdm, and qpWave in Python.
 
 ## Setup
 
