@@ -131,7 +131,7 @@ popdrop:
 
 ## Citation
 
-admixpy implements methods from Patterson et al. (2012) and Maier et al. (2023).
+AdmixPy implements methods from Patterson et al. (2012) and Maier et al. (2023).
 
 ## License
 
