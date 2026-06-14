@@ -39,6 +39,56 @@ def _chi2_sf(x: float, df: int) -> float:
     return float(scipy_stats.chi2.sf(x, df))
 
 
+def _format_number(x, decimals: int) -> str:
+    if not np.isfinite(x):
+        return "NaN"
+    rounded = float(np.round(x, decimals))
+    return np.format_float_positional(rounded, precision=decimals, fractional=True, trim="-")
+
+
+def _format_significant(x, digits: int = 6) -> str:
+    if not np.isfinite(x):
+        return "NaN"
+    return f"{x:.{digits}g}"
+
+
+def _format_pvalue(x) -> str:
+    if not np.isfinite(x):
+        return "NaN"
+    if x == 0:
+        return "0"
+    if abs(x) < 0.001:
+        return f"{x:.3g}"
+    return _format_number(x, 3)
+
+
+def format_fstats(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a display-formatted copy of an f-statistics result frame."""
+    out = df.copy()
+    for col in out.select_dtypes(include=[np.number]).columns:
+        if col == "p":
+            out[col] = out[col].map(_format_pvalue)
+        elif col == "z":
+            out[col] = out[col].map(lambda x: _format_number(x, 2))
+        elif col in {"est", "se"}:
+            out[col] = out[col].map(_format_significant)
+    return out
+
+
+class FStatsFrame(pd.DataFrame):
+    """DataFrame that keeps raw numeric values but displays f-stats compactly."""
+
+    @property
+    def _constructor(self):
+        return FStatsFrame
+
+    def __repr__(self) -> str:
+        return format_fstats(pd.DataFrame(self)).to_string()
+
+    def _repr_html_(self):
+        return format_fstats(pd.DataFrame(self))._repr_html_()
+
+
 @dataclass
 class F2Blocks:
     data: np.ndarray
@@ -83,7 +133,7 @@ class BlockStats:
     def p(self) -> np.ndarray:
         return np.array([math.erfc(abs(z) / math.sqrt(2)) if np.isfinite(z) else float("nan") for z in self.z])
 
-    def to_frame(self, round_z: int | None = 2, round_p: int | None = 3) -> pd.DataFrame:
+    def to_frame(self, round_z: int | None = None, round_p: int | None = None) -> pd.DataFrame:
         out = self.rows.copy()
         # In allsnps mode the per-stat per-block SNP counts are attached as
         # `snp_counts`; in that case report each stat with its own block sizes
@@ -108,7 +158,7 @@ class BlockStats:
         out["z"] = np.round(z, round_z) if round_z is not None else z
         p = np.array([math.erfc(abs(zz) / math.sqrt(2)) if np.isfinite(zz) else float("nan") for zz in z])
         out["p"] = np.round(p, round_p) if round_p is not None else p
-        return out
+        return FStatsFrame(out)
 
 
 @dataclass
@@ -174,28 +224,19 @@ class QpAdmResult:
         out = df[[c for c in cols if c in df.columns]].copy()
         for col in out.select_dtypes(include=[np.number]).columns:
             if col in {"p", "p_nested"}:
-                out[col] = out[col].map(QpAdmResult._format_pvalue)
+                out[col] = out[col].map(_format_pvalue)
             else:
                 decimals = 3 if col == "weight" else 2
-                out[col] = out[col].map(lambda x, d=decimals: QpAdmResult._format_number(x, d))
+                out[col] = out[col].map(lambda x, d=decimals: _format_number(x, d))
         return out.to_string(index=False)
 
     @staticmethod
     def _format_number(x, decimals: int) -> str:
-        if not np.isfinite(x):
-            return "NaN"
-        rounded = float(np.round(x, decimals))
-        return np.format_float_positional(rounded, precision=decimals, fractional=True, trim="-")
+        return _format_number(x, decimals)
 
     @staticmethod
     def _format_pvalue(x) -> str:
-        if not np.isfinite(x):
-            return "NaN"
-        if x == 0:
-            return "0"
-        if abs(x) < 0.001:
-            return f"{x:.3g}"
-        return QpAdmResult._format_number(x, 3)
+        return _format_pvalue(x)
 
     def __repr__(self) -> str:
         lines = [f"QpAdmResult(target={self.target!r})", "", "weights:"]
@@ -764,7 +805,7 @@ def f2(data, pop1=None, pop2=None, unique_only: bool = True, **kwargs) -> pd.Dat
         else:
             est, var = jack_vec_stats(loo.pair(a, b), blocks.block_lengths)
         rows.append({"pop1": a, "pop2": b, "est": est, "se": float(np.sqrt(var))})
-    return pd.DataFrame(rows)
+    return FStatsFrame(pd.DataFrame(rows))
 
 
 def fst(data, pop1=None, pop2=None, unique_only: bool = True, **kwargs) -> pd.DataFrame:
@@ -799,7 +840,7 @@ def fst(data, pop1=None, pop2=None, unique_only: bool = True, **kwargs) -> pd.Da
         else:
             est, var = jack_vec_stats(loo.pair(a, b), blocks.block_lengths)
         rows.append({"pop1": a, "pop2": b, "est": est, "se": float(np.sqrt(var))})
-    return pd.DataFrame(rows)
+    return FStatsFrame(pd.DataFrame(rows))
 
 
 def f3_from_f2(blocks: F2Blocks, pop1: str, pop2: str, pop3: str) -> np.ndarray:
@@ -867,7 +908,6 @@ def qp3pop(
         se = float(np.sqrt(var))
         z = est / se if np.isfinite(se) and se != 0 else float("nan")
         p = math.erfc(abs(z) / math.sqrt(2)) if np.isfinite(z) else float("nan")
-        z_out = round(z, 2) if np.isfinite(z) else z
         rows.append(
             {
                 "pop1": row.pop1,
@@ -875,11 +915,11 @@ def qp3pop(
                 "pop3": row.pop3,
                 "est": est,
                 "se": se,
-                "z": z_out,
+                "z": z,
                 "p": p,
             }
         )
-    return pd.DataFrame(rows)
+    return FStatsFrame(pd.DataFrame(rows))
 
 
 def f4_from_f2(blocks: F2Blocks, pop1: str, pop2: str, pop3: str, pop4: str) -> np.ndarray:
