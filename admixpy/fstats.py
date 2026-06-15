@@ -86,7 +86,7 @@ class FStatsFrame(pd.DataFrame):
         return format_fstats(pd.DataFrame(self)).to_string()
 
     def _repr_html_(self):
-        return format_fstats(pd.DataFrame(self))._repr_html_()
+        return None
 
 
 @dataclass
