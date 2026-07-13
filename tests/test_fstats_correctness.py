@@ -425,5 +425,136 @@ class RawF4Tests(unittest.TestCase):
         self.assertNotAlmostEqual(raw.loc[0, "est"], cached.loc[0, "est"])
 
 
+class DirectF3Tests(unittest.TestCase):
+    @staticmethod
+    def _write_singleton_source_eigenstrat(root: Path) -> Path:
+        pref = root / "singleton_source"
+        pref.with_suffix(".ind").write_text(
+            "A1 M A\nA2 F A\nB1 M B\nB2 F B\nC1 U C\n"
+        )
+        positions = [
+            0.00,
+            0.01,
+            0.02,
+            0.03,
+            0.06,
+            0.07,
+            0.08,
+            0.09,
+            0.12,
+            0.13,
+            0.14,
+            0.15,
+        ]
+        pref.with_suffix(".snp").write_text(
+            "".join(f"s{i} 1 {cm:.2f} {i * 100} A G\n" for i, cm in enumerate(positions, 1))
+        )
+        pref.with_suffix(".geno").write_text(
+            "\n".join(
+                [
+                    "02002",
+                    "02200",
+                    "20020",
+                    "20222",
+                    "00222",
+                    "22000",
+                    "00002",
+                    "22220",
+                    "02009",
+                    "20029",
+                    "00209",
+                    "22029",
+                ]
+            )
+            + "\n"
+        )
+        return pref
+
+    def test_singleton_source_is_finite_and_matches_corrected_repeated_f4(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_singleton_source_eigenstrat(Path(tmp))
+            f3 = qp3pop(pref, "A", "B", "C", blgsize=0.05, verbose=False)
+            swapped = qp3pop(pref, "A", "C", "B", blgsize=0.05, verbose=False)
+            repeated_f4 = qpdstat(
+                pref,
+                "A",
+                "B",
+                "A",
+                "C",
+                blgsize=0.05,
+                apply_corr=True,
+                verbose=False,
+            )
+        self.assertTrue(np.isfinite(f3.loc[0, "est"]))
+        self.assertTrue(np.isfinite(f3.loc[0, "se"]))
+        self.assertEqual(f3.loc[0, "n"], 8)
+        self.assertAlmostEqual(f3.loc[0, "est"], swapped.loc[0, "est"])
+        self.assertAlmostEqual(f3.loc[0, "se"], swapped.loc[0, "se"])
+        self.assertAlmostEqual(f3.loc[0, "est"], repeated_f4.loc[0, "est"])
+        self.assertAlmostEqual(f3.loc[0, "se"], repeated_f4.loc[0, "se"])
+
+    def test_singleton_target_remains_unestimable_when_correcting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_singleton_source_eigenstrat(Path(tmp))
+            with self.assertWarnsRegex(RuntimeWarning, "at least two"):
+                out = qp3pop(pref, "C", "A", "B", blgsize=0.05, verbose=False)
+        self.assertTrue(np.isnan(out.loc[0, "est"]))
+        self.assertTrue(np.isnan(out.loc[0, "se"]))
+        self.assertEqual(out.loc[0, "n"], 0)
+
+    def test_complete_direct_f3_matches_f2_derived_f3(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = RawF4Tests._write_complete_eigenstrat(Path(tmp))
+            direct = qp3pop(
+                pref,
+                "A",
+                "B",
+                "C",
+                blgsize=0.04,
+                allsnps=False,
+                poly_only=False,
+                maxmiss=0,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            direct_nominal = qp3pop(
+                pref,
+                "A",
+                "B",
+                "C",
+                blgsize=0.04,
+                allsnps=False,
+                poly_only=False,
+                maxmiss=0,
+                adjust_pseudohaploid=False,
+                resampling="nominal_blocks",
+                verbose=False,
+            )
+            blocks = f2_from_geno(
+                pref,
+                pops=["A", "B", "C"],
+                blgsize=0.04,
+                poly_only=False,
+                maxmiss=0,
+                remove_na=False,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            cached = qp3pop(blocks, "A", "B", "C", verbose=False)
+            cached_nominal = qp3pop(
+                blocks,
+                "A",
+                "B",
+                "C",
+                resampling="nominal_blocks",
+                verbose=False,
+            )
+        self.assertAlmostEqual(direct.loc[0, "est"], cached.loc[0, "est"])
+        self.assertAlmostEqual(direct.loc[0, "se"], cached.loc[0, "se"])
+        self.assertAlmostEqual(direct_nominal.loc[0, "est"], cached_nominal.loc[0, "est"])
+        self.assertAlmostEqual(direct_nominal.loc[0, "se"], cached_nominal.loc[0, "se"])
+        self.assertNotIn("n", direct_nominal.columns)
+
+
 if __name__ == "__main__":
     unittest.main()

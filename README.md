@@ -78,11 +78,22 @@ statistic from its available SNPs. Use `allsnps=False` to restrict the model to
 SNPs shared across the required populations. Precomputed f2 input keeps the
 standard f2-based behavior.
 
+Direct genotype `f3` also defaults to `allsnps=True` and is calculated per SNP
+rather than reconstructed from pairwise f2. For distinct populations in
+`f3(A; B, C)`, bias correction is required only for the repeated target `A`, so
+a single pseudohaploid sample is allowed in source position `B` or `C` but not
+in target position `A`. If the same source is used for `B` and `C`, that source
+also needs at least two allele observations because `f3(A; B, B)` is
+`f2(A, B)`. A singleton target therefore returns `NaN` with `n=0` when
+`apply_corr=True` (default). Set `apply_corr=False` to calculate the finite raw
+estimate while accepting its sampling bias.
+
 Lower-level helpers are also exported for direct use, including allele-frequency
 conversion (`anygeno_to_afs`, `eigenstrat_to_afs`, `plink_to_afs`,
 `packedancestrymap_to_afs`, `tgeno_to_afs`), f2 block IO and access
 (`get_f2`, `read_f2`, `write_f2`), and block/statistical utilities such as
-`block_covariance`, `jackknife_cov`, `stats_to_loo`, and `est_to_loo`.
+`f3_stats_from_geno`, `block_covariance`, `jackknife_cov`, `stats_to_loo`, and
+`est_to_loo`.
 
 ### SNP selection, missingness, and small samples
 

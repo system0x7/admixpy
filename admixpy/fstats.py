@@ -362,11 +362,11 @@ def _warn_singleton_observations(stat: str, apply_corr: bool, *pairs: tuple[np.n
     if apply_corr:
         message = (
             f"{stat} bias correction requires at least two independent allele observations; "
-            "excluding population-pair SNP values with count < 2"
+            "excluding affected SNP values with count < 2"
         )
     else:
         message = (
-            f"{stat} includes population-pair SNP values with count < 2 because apply_corr=False; "
+            f"{stat} includes affected SNP values with count < 2 because apply_corr=False; "
             "those values cannot be estimated without sampling bias"
         )
     warnings.warn(message, RuntimeWarning, stacklevel=3)
@@ -1312,13 +1312,48 @@ def qp3pop(
     verbose: bool = True,
     **kwargs,
 ) -> pd.DataFrame:
+    """Compute f3(A; B, C) statistics.
+
+    Genotype prefixes use a direct per-SNP estimator, which corrects only
+    populations repeated across both contrasts. F2Blocks and cache directories
+    retain the f2-derived estimator
+    """
     resampling = _validate_resampling(resampling)
     kwargs = dict(kwargs)
-    if resampling == "pairwise_counts":
-        kwargs.setdefault("remove_na", False)
     combos = _f3_combinations(data, pop1, pop2, pop3, unique_only)
     if unique_only:
         combos = combos.drop_duplicates().reset_index(drop=True)
+    is_genotype = _default_genotype_allsnps(data)
+    requested_allsnps = kwargs.pop("allsnps", None)
+    allsnps = is_genotype if requested_allsnps is None else bool(requested_allsnps)
+    if is_genotype:
+        # Direct f3 handles missingness per combination, so the f2-cache-only
+        # remove_na option has no role on this path.
+        kwargs.pop("remove_na", None)
+        stats = f3_stats_from_geno(
+            data,
+            combos,
+            allsnps=allsnps,
+            verbose=verbose,
+            **kwargs,
+        )
+        if resampling == "nominal_blocks":
+            nominal_lengths = np.asarray(stats.nominal_block_lengths, float)
+            loo = stats_to_loo(stats.blocks, nominal_lengths)
+            cov, est = jackknife_cov(loo, nominal_lengths)
+            stats.block_lengths = nominal_lengths
+            stats.loo = loo
+            stats.est = est
+            stats.cov = cov
+            stats.snp_counts = None
+        out = stats.to_frame()
+        if resampling == "pairwise_counts":
+            out["n"] = np.sum(stats.snp_counts, axis=1).astype(int)
+        return FStatsFrame(out)
+    if allsnps:
+        raise ValueError(_ALLSNPS_DIRECT_ERROR)
+    if resampling == "pairwise_counts":
+        kwargs.setdefault("remove_na", False)
     pops = list(dict.fromkeys(list(combos["pop1"]) + list(combos["pop2"]) + list(combos["pop3"])))
     _log(f"Loading f2 data for {len(pops) * len(pops)} population pairs", verbose)
     blocks = get_f2(data, pops=pops, **kwargs)
@@ -1400,6 +1435,8 @@ def _f4_direct_blocks_from_afs(
     allsnps: bool = False,
     poly_only: bool = False,
     snpwt: Sequence[float] | None = None,
+    apply_corr: bool = True,
+    stat_name: str = "f4",
     verbose: bool = True,
 ) -> BlockStats:
     cols = ["pop1", "pop2", "pop3", "pop4"]
@@ -1416,8 +1453,26 @@ def _f4_direct_blocks_from_afs(
         raise ValueError(f"Populations missing from allele-frequency table: {missing}")
 
     arr = afdat.afs.to_numpy(float)
+    count_arr = afdat.counts.to_numpy(float)
     pop_i = {p: i for i, p in enumerate(pops)}
     idx = np.asarray([[pop_i[getattr(row, c)] for c in cols] for row in combos.itertuples(index=False)], dtype=int)
+    correction_coefficients = np.zeros((len(combos), len(pops)), dtype=float)
+    for stat_i, row in enumerate(combos.itertuples(index=False)):
+        first: dict[str, float] = {}
+        second: dict[str, float] = {}
+        first[row.pop1] = first.get(row.pop1, 0.0) + 1.0
+        first[row.pop2] = first.get(row.pop2, 0.0) - 1.0
+        second[row.pop3] = second.get(row.pop3, 0.0) + 1.0
+        second[row.pop4] = second.get(row.pop4, 0.0) - 1.0
+        for pop in set(first) | set(second):
+            correction_coefficients[stat_i, pop_i[pop]] = first.get(pop, 0.0) * second.get(pop, 0.0)
+    correction_pops = np.flatnonzero(np.any(correction_coefficients != 0, axis=0))
+    if correction_pops.size:
+        _warn_singleton_observations(
+            stat_name,
+            apply_corr,
+            (arr[:, correction_pops], count_arr[:, correction_pops]),
+        )
     block_lengths = get_block_lengths(afdat.snpfile, blgsize)
     nstats = len(combos)
     out = np.full((nstats, len(block_lengths)), np.nan, dtype=float)
@@ -1440,20 +1495,37 @@ def _f4_direct_blocks_from_afs(
     start = 0
     for b, n in enumerate(block_lengths):
         stop = start + int(n)
-        _log_block("direct f4", b, len(block_lengths), start, stop, verbose)
+        _log_block(f"direct {stat_name}", b, len(block_lengths), start, stop, verbose)
         block = arr[start:stop]
+        count_block = count_arr[start:stop]
         for stat_i, row in enumerate(combos.itertuples(index=False)):
             p = idx[stat_i]
             vals = block[:, p]
-            use = np.isfinite(vals).all(axis=1) if allsnps else use_by_model[getattr(row, "model")][start:stop]
+            use = (
+                np.isfinite(vals).all(axis=1)
+                if allsnps
+                else use_by_model[getattr(row, "model")][start:stop].copy()
+            )
             if allsnps and poly_only:
                 finite_vals = vals[use]
                 if finite_vals.size:
                     use_idx = np.where(use)[0]
                     use[use_idx] &= np.max(finite_vals, axis=1) != np.min(finite_vals, axis=1)
+            correction = correction_coefficients[stat_i]
+            required = np.flatnonzero(correction != 0)
+            if apply_corr and required.size:
+                use &= np.isfinite(count_block[:, required]).all(axis=1)
+                use &= (count_block[:, required] > 1).all(axis=1)
             if not np.any(use):
                 continue
             f4vals = (vals[use, 0] - vals[use, 1]) * (vals[use, 2] - vals[use, 3])
+            if apply_corr:
+                for pop_idx in required:
+                    corr = _sample_bias_correction(
+                        block[use, pop_idx],
+                        count_block[use, pop_idx],
+                    )
+                    f4vals = f4vals - correction[pop_idx] * corr
             if snpwt is not None:
                 f4vals = f4vals * snpwt[start:stop][use]
             out[stat_i, b] = float(np.mean(f4vals))
@@ -1469,8 +1541,9 @@ def _f4_direct_blocks_from_afs(
     contributes = np.asarray([jack.contributes for jack in jacks], bool)
     cov = _influence_covariance(influence, contributes)
     rows = combos.drop(columns=["model"]) if set(combos["model"]) == {1} else combos
-    stats = BlockStats(rows=rows.reset_index(drop=True), blocks=out, block_lengths=effective_lengths, stat="f4", loo=loo, est=est, cov=cov)
+    stats = BlockStats(rows=rows.reset_index(drop=True), blocks=out, block_lengths=effective_lengths, stat=stat_name, loo=loo, est=est, cov=cov)
     stats.snp_counts = snp_counts
+    stats.nominal_block_lengths = np.asarray(block_lengths, float)
     return stats
 
 
@@ -1488,6 +1561,7 @@ def f4_stats_from_geno(
     keepsnps=None,
     allsnps: bool = False,
     poly_only: bool = False,
+    apply_corr: bool = True,
     format: str | None = None,
     adjust_pseudohaploid=True,
     chunk_size: int = 10_000,
@@ -1520,7 +1594,133 @@ def f4_stats_from_geno(
         keepsnps=keepsnps,
         poly_only=False,
     )
-    return _f4_direct_blocks_from_afs(afdat, popcombs, blgsize=blgsize, allsnps=allsnps, poly_only=poly_only, verbose=verbose)
+    return _f4_direct_blocks_from_afs(
+        afdat,
+        popcombs,
+        blgsize=blgsize,
+        allsnps=allsnps,
+        poly_only=poly_only,
+        apply_corr=apply_corr,
+        verbose=verbose,
+    )
+
+
+def _f3_direct_blocks_from_afs(
+    afdat: AfData,
+    combos: pd.DataFrame,
+    blgsize: float = 0.05,
+    allsnps: bool = True,
+    poly_only: bool = False,
+    snpwt: Sequence[float] | None = None,
+    apply_corr: bool = True,
+    verbose: bool = True,
+) -> BlockStats:
+    cols = ["pop1", "pop2", "pop3"]
+    missing_cols = [col for col in cols if col not in combos.columns]
+    if missing_cols:
+        raise ValueError(f"f3 combinations are missing columns: {missing_cols}")
+    combos = combos.reset_index(drop=True).copy()
+    mapped = pd.DataFrame(
+        {
+            "pop1": combos["pop1"],
+            "pop2": combos["pop2"],
+            "pop3": combos["pop1"],
+            "pop4": combos["pop3"],
+        }
+    )
+    if "model" in combos.columns:
+        mapped["model"] = combos["model"]
+    stats = _f4_direct_blocks_from_afs(
+        afdat,
+        mapped,
+        blgsize=blgsize,
+        allsnps=allsnps,
+        poly_only=poly_only,
+        snpwt=snpwt,
+        apply_corr=apply_corr,
+        stat_name="f3",
+        verbose=verbose,
+    )
+    stats.rows = combos[cols].copy()
+    stats.stat = "f3"
+    return stats
+
+
+def f3_stats_from_geno(
+    pref: str | Path,
+    popcombs: pd.DataFrame,
+    blgsize: float = 0.05,
+    maxmiss: float | None = None,
+    minmaf: float = 0,
+    maxmaf: float = 0.5,
+    minac2: bool | int = False,
+    outpop: str | None = None,
+    outpop_scale: bool = True,
+    transitions: bool = True,
+    transversions: bool = True,
+    auto_only: bool = True,
+    keepsnps=None,
+    allsnps: bool = True,
+    poly_only: bool = False,
+    apply_corr: bool = True,
+    format: str | None = None,
+    adjust_pseudohaploid=True,
+    chunk_size: int = 10_000,
+    tgeno_chunked: bool = False,
+    verbose: bool = True,
+) -> BlockStats:
+    """Compute corrected f3 blocks directly from genotype data.
+
+    For f3(A; B, C), finite-sample correction is required only for
+    populations repeated across the two contrasts. With distinct A, B, and C,
+    this is A, so a singleton B or C remains estimable.
+    """
+    cols = ["pop1", "pop2", "pop3"]
+    missing_cols = [col for col in cols if col not in popcombs.columns]
+    if missing_cols:
+        raise ValueError(f"f3 combinations are missing columns: {missing_cols}")
+    pops = list(dict.fromkeys(popcombs[cols].to_numpy().reshape(-1)))
+    if outpop is not None and outpop not in pops:
+        pops.append(outpop)
+    afdat = anygeno_to_afs(
+        pref,
+        pops=pops,
+        format=format,
+        adjust_pseudohaploid=adjust_pseudohaploid,
+        chunk_size=chunk_size,
+        verbose=verbose,
+        tgeno_chunked=tgeno_chunked,
+    )
+    _log("Filtering SNPs", verbose)
+    if maxmiss is None:
+        maxmiss = 1 if allsnps else 0
+    afdat = discard_from_aftable(
+        afdat,
+        maxmiss=maxmiss,
+        minmaf=minmaf,
+        maxmaf=maxmaf,
+        minac2=minac2,
+        outpop=outpop,
+        transitions=transitions,
+        transversions=transversions,
+        auto_only=auto_only,
+        keepsnps=keepsnps,
+        poly_only=False,
+    )
+    snpwt = None
+    if outpop is not None and outpop_scale:
+        outgroup_af = afdat.afs[outpop].to_numpy(float)
+        snpwt = 1 / (outgroup_af * (1 - outgroup_af))
+    return _f3_direct_blocks_from_afs(
+        afdat,
+        popcombs,
+        blgsize=blgsize,
+        allsnps=allsnps,
+        poly_only=poly_only,
+        snpwt=snpwt,
+        apply_corr=apply_corr,
+        verbose=verbose,
+    )
 
 
 def f4_stats(
