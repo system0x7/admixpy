@@ -275,7 +275,11 @@ class QpAdmResult:
     weight_cov: np.ndarray | None = None
 
     @staticmethod
-    def _display_frame(df: pd.DataFrame, cols: Sequence[str]) -> str:
+    def _display_frame(
+        df: pd.DataFrame,
+        cols: Sequence[str],
+        max_colwidth: int | None = None,
+    ) -> str:
         out = df[[c for c in cols if c in df.columns]].copy()
         for col in out.select_dtypes(include=[np.number]).columns:
             if col in {"p", "p_nested"}:
@@ -285,7 +289,7 @@ class QpAdmResult:
             else:
                 decimals = 3 if col == "weight" else 2
                 out[col] = out[col].map(lambda x, d=decimals: _format_number(x, d))
-        return out.to_string(index=False)
+        return out.to_string(index=False, max_colwidth=max_colwidth)
 
     @staticmethod
     def _format_number(x, decimals: int) -> str:
@@ -302,7 +306,13 @@ class QpAdmResult:
         lines.append(self._display_frame(self.rankdrop, ["f4rank", "dof", "chisq", "p", "p_nested"]))
         if self.popdrop is not None:
             lines.extend(["", "popdrop:"])
-            lines.append(self._display_frame(self.popdrop, ["pat", "dropped", "f4rank", "dof", "chisq", "p", "feasible", "status"]))
+            lines.append(
+                self._display_frame(
+                    self.popdrop,
+                    ["pat", "dropped", "f4rank", "dof", "chisq", "p", "feasible", "status"],
+                    max_colwidth=72,
+                )
+            )
         extras = []
         if self.f4 is not None:
             extras.append("f4")
