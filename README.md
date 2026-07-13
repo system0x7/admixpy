@@ -31,7 +31,7 @@ python -c "import admixpy; print(admixpy.__file__)"
 ### Updating an existing clone
 
 ```bash
-cd /path/to/AdmixPy
+cd /path/to/admixpy
 git pull --ff-only
 ```
 
