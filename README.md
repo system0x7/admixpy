@@ -75,6 +75,35 @@ conversion (`anygeno_to_afs`, `eigenstrat_to_afs`, `plink_to_afs`,
 (`get_f2`, `read_f2`, `write_f2`), and block/statistical utilities such as
 `block_covariance`, `jackknife_cov`, `stats_to_loo`, and `est_to_loo`.
 
+### SNP selection, missingness, and small samples
+
+By default, `f2` excludes SNPs with identical allele frequencies in every
+loaded population, while `fst` retains them. This matches the ADMIXTOOLS
+default but means the two statistics can use different SNP sets. Use
+`poly_only=True` to both calls when they should be directly comparable.
+
+AdmixPy uses `resampling="pairwise_counts"` as default for data
+with missing genotypes: each population pair is weighted by the SNP
+observations actually available for that pair. Pairwise `f2` and `fst` result
+tables include `n`. Set `resampling="nominal_blocks"` to reproduce the older
+behavior in which every pair uses nominal block sizes. Raw-genotype f4 with
+`allsnps=True` already uses per-statistic counts on a common SNP intersection.
+Cached pairwise f3/f4 instead defines a pairwise-available estimator and cannot
+reconstruct that common intersection.
+
+FST cache files additionally retain numerator and denominator sums. The
+default `fst_aggregation="block_ratios"` averages stored block estimates.
+Set `fst_aggregation="pooled_components"` to recompute full-data and
+leave-one-block-out FST as ratios of pooled numerator and denominator sums.
+
+Bias-corrected f2 and FST require at least two independent allele observations
+in each population. SNP values with a count below two are excluded with a
+warning when `apply_corr=True`. Setting `apply_corr=False` explicitly requests
+the finite but sampling-biased raw estimate; the Hudson FST denominator remains
+`(p1-p2)^2 + p1(1-p1) + p2(1-p2)` in either mode.
+
+Cache files without real per-pair SNP counts are rejected and must be rebuilt.
+
 Run an f4 statistic from a supported genotype dataset prefix:
 
 ```python

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import combinations, combinations_with_replacement, product
 import math
+import warnings
 from pathlib import Path
 from typing import Sequence
 
@@ -62,6 +63,12 @@ def _format_pvalue(x) -> str:
     return _format_number(x, 3)
 
 
+def _nanmean(arr: np.ndarray, axis: int) -> np.ndarray:
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Mean of empty slice", category=RuntimeWarning)
+        return np.nanmean(arr, axis=axis)
+
+
 def format_fstats(df: pd.DataFrame) -> pd.DataFrame:
     """Return a display-formatted copy of an f-statistics result frame."""
     out = df.copy()
@@ -96,16 +103,64 @@ class F2Blocks:
     pops2: list[str]
     block_lengths: np.ndarray
     stat: str = "f2"
+    snp_counts: np.ndarray | None = None
+    fst_num: np.ndarray | None = None
+    fst_den: np.ndarray | None = None
 
     def subset(self, pops=None, pops2=None) -> "F2Blocks":
         pops = self.pops1 if pops is None else list(pops)
         pops2 = pops if pops2 is None else list(pops2)
         i = [self.pops1.index(p) for p in pops]
         j = [self.pops2.index(p) for p in pops2]
-        return F2Blocks(self.data[np.ix_(i, j, range(self.data.shape[2]))], pops, pops2, self.block_lengths.copy(), self.stat)
+        ix = np.ix_(i, j, range(self.data.shape[2]))
+
+        def take(arr):
+            return None if arr is None else arr[ix]
+
+        return F2Blocks(
+            self.data[ix],
+            pops,
+            pops2,
+            self.block_lengths.copy(),
+            self.stat,
+            take(self.snp_counts),
+            take(self.fst_num),
+            take(self.fst_den),
+        )
 
     def pair(self, pop1: str, pop2: str) -> np.ndarray:
         return self.data[self.pops1.index(pop1), self.pops2.index(pop2), :]
+
+    def pair_counts(self, pop1: str, pop2: str) -> np.ndarray | None:
+        if self.snp_counts is None:
+            return None
+        return self.snp_counts[self.pops1.index(pop1), self.pops2.index(pop2), :]
+
+    def pair_fst_components(self, pop1: str, pop2: str) -> tuple[np.ndarray, np.ndarray] | None:
+        if self.fst_num is None or self.fst_den is None:
+            return None
+        i, j = self.pops1.index(pop1), self.pops2.index(pop2)
+        num, den = self.fst_num[i, j, :], self.fst_den[i, j, :]
+        if not np.any(np.isfinite(num) & np.isfinite(den)):
+            return None
+        return num, den
+
+    def select_blocks(self, keep: Sequence[bool]) -> "F2Blocks":
+        keep = np.asarray(keep, bool)
+
+        def take(arr):
+            return None if arr is None else arr[:, :, keep]
+
+        return F2Blocks(
+            self.data[:, :, keep],
+            self.pops1,
+            self.pops2,
+            self.block_lengths[keep],
+            self.stat,
+            take(self.snp_counts),
+            take(self.fst_num),
+            take(self.fst_den),
+        )
 
 
 @dataclass
@@ -276,13 +331,41 @@ def _block_mean(arr: np.ndarray, block_lengths: Sequence[int]) -> np.ndarray:
     for b, n in enumerate(block_lengths):
         stop = start + int(n)
         with np.errstate(invalid="ignore"):
-            out[:, :, b] = np.nanmean(arr[:, :, start:stop], axis=2)
+            out[:, :, b] = _nanmean(arr[:, :, start:stop], axis=2)
         start = stop
     return out
 
 
 def _outer_pair(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return a.T[:, None, :] * b.T[None, :, :]
+
+
+def _has_singleton_observations(afs: np.ndarray, counts: np.ndarray) -> bool:
+    return bool(np.any(np.isfinite(afs) & np.isfinite(counts) & (counts < 2)))
+
+
+def _warn_singleton_observations(stat: str, apply_corr: bool, *pairs: tuple[np.ndarray, np.ndarray]) -> None:
+    if not any(_has_singleton_observations(afs, counts) for afs, counts in pairs):
+        return
+    if apply_corr:
+        message = (
+            f"{stat} bias correction requires at least two independent allele observations; "
+            "excluding population-pair SNP values with count < 2"
+        )
+    else:
+        message = (
+            f"{stat} includes population-pair SNP values with count < 2 because apply_corr=False; "
+            "those values cannot be estimated without sampling bias"
+        )
+    warnings.warn(message, RuntimeWarning, stacklevel=3)
+
+
+def _sample_bias_correction(afs: np.ndarray, counts: np.ndarray) -> np.ndarray:
+    correction = np.full_like(afs, np.nan, dtype=float)
+    valid = np.isfinite(afs) & np.isfinite(counts) & (counts > 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        np.divide(afs * (1 - afs), counts - 1, out=correction, where=valid)
+    return correction
 
 
 def mats_to_f2arr(
@@ -299,19 +382,20 @@ def mats_to_f2arr(
     c1, c2 = np.asarray(countmat1, float), np.asarray(countmat2, float)
     out = np.empty((a1.shape[1], a2.shape[1], len(block_lengths)), dtype=float)
     snpwt = None if snpwt is None else np.asarray(snpwt, float)
+    _warn_singleton_observations("f2", apply_corr, (a1, c1), (a2, c2))
     start = 0
     for b, n in enumerate(block_lengths):
         stop = start + int(n)
         _log_block("f2", b, len(block_lengths), start, stop, verbose)
         vals = (a1[start:stop].T[:, None, :] - a2[start:stop].T[None, :, :]) ** 2
         if apply_corr:
-            corr1 = a1[start:stop] * (1 - a1[start:stop]) / np.maximum(1, c1[start:stop] - 1)
-            corr2 = a2[start:stop] * (1 - a2[start:stop]) / np.maximum(1, c2[start:stop] - 1)
+            corr1 = _sample_bias_correction(a1[start:stop], c1[start:stop])
+            corr2 = _sample_bias_correction(a2[start:stop], c2[start:stop])
             vals = vals - (corr1.T[:, None, :] + corr2.T[None, :, :])
         if snpwt is not None:
             vals = vals * snpwt[start:stop][None, None, :]
         with np.errstate(invalid="ignore"):
-            out[:, :, b] = np.nanmean(vals, axis=2)
+            out[:, :, b] = _nanmean(vals, axis=2)
         start = stop
     return out
 
@@ -328,14 +412,14 @@ def mats_to_aparr(afmat1, afmat2, countmat1, countmat2, block_lengths, snpwt=Non
         if snpwt is not None:
             vals = vals * snpwt[start:stop][None, None, :]
         with np.errstate(invalid="ignore"):
-            out[:, :, b] = np.nanmean(vals, axis=2)
+            out[:, :, b] = _nanmean(vals, axis=2)
         start = stop
     return out
 
 
 def mats_to_ctarr(afmat1, afmat2, block_lengths, verbose: bool = False) -> np.ndarray:
-    # Per-block average of finite-pair counts for the SNPs in each pop1 x pop2 cell.
-    # Counts are derived from afmat finiteness; the per-pop count matrices aren't needed.
+    # Per-block finite-pair availability fraction for each pop1 x pop2 cell.
+    # Multiply by the corresponding block length to obtain a raw SNP count.
     a1 = np.isfinite(np.asarray(afmat1, float)).astype(float)
     a2 = np.isfinite(np.asarray(afmat2, float)).astype(float)
     out = np.empty((a1.shape[1], a2.shape[1], len(block_lengths)), dtype=float)
@@ -349,33 +433,68 @@ def mats_to_ctarr(afmat1, afmat2, block_lengths, verbose: bool = False) -> np.nd
     return out
 
 
-def _hudson_fst(afmat1, afmat2, countmat1, countmat2, block_lengths, snpwt=None, apply_corr=True, verbose: bool = False) -> np.ndarray:
+def _hudson_fst_components(
+    afmat1,
+    afmat2,
+    countmat1,
+    countmat2,
+    block_lengths,
+    snpwt=None,
+    apply_corr=True,
+    verbose: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     a1, a2 = np.asarray(afmat1, float), np.asarray(afmat2, float)
     c1, c2 = np.asarray(countmat1, float), np.asarray(countmat2, float)
     out = np.empty((a1.shape[1], a2.shape[1], len(block_lengths)), dtype=float)
+    snp_counts = np.zeros_like(out)
+    num_sums = np.full_like(out, np.nan)
+    den_sums = np.full_like(out, np.nan)
     snpwt = None if snpwt is None else np.asarray(snpwt, float)
+    _warn_singleton_observations("FST", apply_corr, (a1, c1), (a2, c2))
     start = 0
     for b, n in enumerate(block_lengths):
         stop = start + int(n)
         _log_block("fst", b, len(block_lengths), start, stop, verbose)
-        # Guard count == 1 (single observation has no usable bias correction):
-        # match mats_to_f2arr's pmax(1, c-1) so a c=1 SNP doesn't NaN the block.
-        den1 = np.maximum(1.0, c1[start:stop] - 1)
-        den2 = np.maximum(1.0, c2[start:stop] - 1)
         h1 = a1[start:stop] * (1 - a1[start:stop])
         h2 = a2[start:stop] * (1 - a2[start:stop])
-        corr1, corr2 = h1 / den1, h2 / den2
-        num = (a1[start:stop].T[:, None, :] - a2[start:stop].T[None, :, :]) ** 2
+        raw_num = (a1[start:stop].T[:, None, :] - a2[start:stop].T[None, :, :]) ** 2
+        denom = raw_num + h1.T[:, None, :] + h2.T[None, :, :]
         if apply_corr:
-            num = num - (corr1.T[:, None, :] + corr2.T[None, :, :])
-        denom = num + (h1 * c1[start:stop] / den1).T[:, None, :] + (h2 * c2[start:stop] / den2).T[None, :, :]
+            corr1 = _sample_bias_correction(a1[start:stop], c1[start:stop])
+            corr2 = _sample_bias_correction(a2[start:stop], c2[start:stop])
+            num = raw_num - (corr1.T[:, None, :] + corr2.T[None, :, :])
+        else:
+            num = raw_num
         if snpwt is not None:
             weight = snpwt[start:stop][None, None, :]
             num = num * weight
             denom = denom * weight
+        valid = np.isfinite(num) & np.isfinite(denom)
+        counts = valid.sum(axis=2).astype(float)
+        num_sum = np.sum(np.where(valid, num, 0.0), axis=2)
+        den_sum = np.sum(np.where(valid, denom, 0.0), axis=2)
+        num_sum[counts == 0] = np.nan
+        den_sum[counts == 0] = np.nan
         with np.errstate(invalid="ignore", divide="ignore"):
-            out[:, :, b] = np.nanmean(num, axis=2) / np.nanmean(denom, axis=2)
+            out[:, :, b] = num_sum / den_sum
+        snp_counts[:, :, b] = counts
+        num_sums[:, :, b] = num_sum
+        den_sums[:, :, b] = den_sum
         start = stop
+    return out, snp_counts, num_sums, den_sums
+
+
+def _hudson_fst(afmat1, afmat2, countmat1, countmat2, block_lengths, snpwt=None, apply_corr=True, verbose: bool = False) -> np.ndarray:
+    out, _, _, _ = _hudson_fst_components(
+        afmat1,
+        afmat2,
+        countmat1,
+        countmat2,
+        block_lengths,
+        snpwt=snpwt,
+        apply_corr=apply_corr,
+        verbose=verbose,
+    )
     return out
 
 
@@ -412,18 +531,36 @@ def afs_to_f2_blocks(
         a1, a2 = afdat.afs.loc[use, pops1], afdat.afs.loc[use, pops2]
         c1, c2 = afdat.counts.loc[use, pops1], afdat.counts.loc[use, pops2]
         snpwt = snpwt_all[use] if snpwt_all is not None else None
+        fst_num = fst_den = None
         if stat == "f2":
             arr = mats_to_f2arr(a1, a2, c1, c2, bl, snpwt, apply_corr, verbose=verbose)
+            count_a1, count_a2 = a1.copy(), a2.copy()
+            if apply_corr:
+                count_a1 = count_a1.mask(c1 <= 1)
+                count_a2 = count_a2.mask(c2 <= 1)
+            snp_counts = np.rint(
+                mats_to_ctarr(count_a1, count_a2, bl, verbose=False) * np.asarray(bl)[None, None, :]
+            )
         elif stat == "ap":
             arr = mats_to_aparr(a1, a2, c1, c2, bl, snpwt, apply_corr, verbose=verbose)
+            snp_counts = np.rint(mats_to_ctarr(a1, a2, bl, verbose=False) * np.asarray(bl)[None, None, :])
         elif stat == "fst":
-            arr = _hudson_fst(a1, a2, c1, c2, bl, snpwt, apply_corr, verbose=verbose)
+            arr, snp_counts, fst_num, fst_den = _hudson_fst_components(
+                a1,
+                a2,
+                c1,
+                c2,
+                bl,
+                snpwt,
+                apply_corr,
+                verbose=verbose,
+            )
         else:
             raise ValueError(stat)
         if pops1 == pops2:
             for i in range(len(pops1)):
                 arr[i, i, :] = 0
-        return F2Blocks(arr, pops1, pops2, bl, stat)
+        return F2Blocks(arr, pops1, pops2, bl, stat, snp_counts, fst_num, fst_den)
 
     if stats is None:
         stats = ["f2"]
@@ -507,12 +644,19 @@ def f2_from_geno(
     )
     blocks = arrs["ap_blocks"] if afprod else arrs["fst_blocks"] if fst else arrs["f2_blocks"]
     if afprod:
-        blocks = F2Blocks(_scale_ap_blocks(blocks.data), blocks.pops1, blocks.pops2, blocks.block_lengths, "ap")
+        blocks = F2Blocks(
+            _scale_ap_blocks(blocks.data),
+            blocks.pops1,
+            blocks.pops2,
+            blocks.block_lengths,
+            "ap",
+            blocks.snp_counts,
+        )
     if remove_na:
         keep = np.isfinite(blocks.data).all(axis=(0, 1))
         if not np.any(keep):
             raise ValueError("No blocks remain after discarding blocks with missing values")
-        blocks = F2Blocks(blocks.data[:, :, keep], blocks.pops1, blocks.pops2, blocks.block_lengths[keep], blocks.stat)
+        blocks = blocks.select_blocks(keep)
     return blocks
 
 
@@ -571,7 +715,14 @@ def _model_left_with_target(row) -> list[str]:
     return left
 
 
-def f4_model_cache(data, models, verbose: bool = True, **kwargs) -> F4ModelCache | F4BlockCache:
+def f4_model_cache(
+    data,
+    models,
+    resampling: str = "pairwise_counts",
+    verbose: bool = True,
+    **kwargs,
+) -> F4ModelCache | F4BlockCache:
+    resampling = _validate_resampling(resampling)
     allsnps = bool(kwargs.pop("allsnps", False))
     if isinstance(data, F4ModelCache):
         if allsnps:
@@ -610,14 +761,26 @@ def f4_model_cache(data, models, verbose: bool = True, **kwargs) -> F4ModelCache
                         }
                     )
         _log(f"Loading reusable f4 cache for {len(combos)} population quadruples", verbose)
-        stats = f4_stats(data, pd.DataFrame(combos), unique_only=False, allsnps=True, verbose=verbose, **kwargs)
+        stats = f4_stats(
+            data,
+            pd.DataFrame(combos),
+            unique_only=False,
+            allsnps=True,
+            resampling=resampling,
+            verbose=verbose,
+            **kwargs,
+        )
         return F4BlockCache(stats=stats, models=models, allsnps=True)
     _log(f"Loading reusable f2 cache for {len(left_pops) * len(right_pops)} population pairs", verbose)
+    if resampling == "pairwise_counts":
+        kwargs.setdefault("remove_na", False)
     blocks = get_f2(data, pops=left_pops, pops2=right_pops, **kwargs)
     return F4ModelCache(blocks=blocks, models=models, left_pops=left_pops, right_pops=right_pops)
 
 
 def write_f2(blocks: F2Blocks, outdir: str | Path, overwrite: bool = False):
+    if blocks.snp_counts is None:
+        raise ValueError("write_f2() requires real per-pair SNP counts")
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     meta = outdir / f"block_lengths_{blocks.stat}.npy"
@@ -632,7 +795,15 @@ def write_f2(blocks: F2Blocks, outdir: str | Path, overwrite: bool = False):
             path = d / f"{b}_{blocks.stat}.npz"
             if path.exists() and not overwrite:
                 continue
-            np.savez_compressed(path, est=blocks.data[i, j, :], counts=np.ones(blocks.data.shape[2]))
+            payload = {
+                "schema_version": np.asarray(2, dtype=np.int64),
+                "est": blocks.data[i, j, :],
+            }
+            payload["n_finite"] = blocks.snp_counts[i, j, :]
+            if blocks.fst_num is not None and blocks.fst_den is not None:
+                payload["fst_num"] = blocks.fst_num[i, j, :]
+                payload["fst_den"] = blocks.fst_den[i, j, :]
+            np.savez_compressed(path, **payload)
 
 
 def read_f2(f2_dir: str | Path, pops: Sequence[str] | None = None, pops2: Sequence[str] | None = None, type: str = "f2", remove_na: bool = True) -> F2Blocks:
@@ -643,17 +814,37 @@ def read_f2(f2_dir: str | Path, pops: Sequence[str] | None = None, pops2: Sequen
     pops2 = pops if pops2 is None else list(pops2)
     bl = np.load(f2_dir / f"block_lengths_{type}.npy")
     arr = np.full((len(pops), len(pops2), len(bl)), np.nan)
+    snp_counts = np.full_like(arr, np.nan)
+    fst_num = np.full_like(arr, np.nan) if type == "fst" else None
+    fst_den = np.full_like(arr, np.nan) if type == "fst" else None
+    have_fst_components = False
     for i, p1 in enumerate(pops):
         for j, p2 in enumerate(pops2):
             a, b = sorted((p1, p2))
             path = f2_dir / a / f"{b}_{type}.npz"
             if not path.exists():
                 raise FileNotFoundError(path)
-            arr[i, j, :] = np.load(path)["est"]
+            with np.load(path) as dat:
+                arr[i, j, :] = dat["est"]
+                if "n_finite" in dat.files:
+                    snp_counts[i, j, :] = dat["n_finite"]
+                else:
+                    raise ValueError(
+                        f"Cache file {path} is missing required per-pair SNP counts; "
+                        "rebuild the cache"
+                    )
+                if type == "fst" and "fst_num" in dat.files and "fst_den" in dat.files:
+                    fst_num[i, j, :] = dat["fst_num"]
+                    fst_den[i, j, :] = dat["fst_den"]
+                    have_fst_components = True
     if remove_na:
         keep = np.isfinite(arr).all(axis=(0, 1))
-        arr, bl = arr[:, :, keep], bl[keep]
-    return F2Blocks(arr, pops, pops2, bl, type)
+        arr, snp_counts, bl = arr[:, :, keep], snp_counts[:, :, keep], bl[keep]
+        if fst_num is not None and fst_den is not None:
+            fst_num, fst_den = fst_num[:, :, keep], fst_den[:, :, keep]
+    if not have_fst_components:
+        fst_num = fst_den = None
+    return F2Blocks(arr, pops, pops2, bl, type, snp_counts, fst_num, fst_den)
 
 
 def get_f2(data, pops=None, pops2=None, **kwargs) -> F2Blocks:
@@ -680,7 +871,10 @@ def get_f2(data, pops=None, pops2=None, **kwargs) -> F2Blocks:
 def est_to_loo(blocks: F2Blocks | np.ndarray, block_lengths: Sequence[int] | None = None):
     arr = blocks.data if isinstance(blocks, F2Blocks) else np.asarray(blocks, float)
     bl = blocks.block_lengths if isinstance(blocks, F2Blocks) else np.asarray(block_lengths, float)
-    tot = np.nansum(arr * bl[None, None, :], axis=2) / np.nansum(np.where(np.isfinite(arr), bl[None, None, :], 0), axis=2)
+    numer = np.nansum(arr * bl[None, None, :], axis=2)
+    denom = np.nansum(np.where(np.isfinite(arr), bl[None, None, :], 0), axis=2)
+    tot = np.full(numer.shape, np.nan, dtype=float)
+    np.divide(numer, denom, out=tot, where=denom != 0)
     rel = bl / bl.sum()
     with np.errstate(invalid="ignore", divide="ignore"):
         out = (tot[:, :, None] - arr * rel[None, None, :]) / (1 - rel[None, None, :])
@@ -697,7 +891,10 @@ def stats_to_loo(blocks: np.ndarray, block_lengths: Sequence[int]) -> np.ndarray
     if arr.shape[1] != len(bl):
         raise ValueError("blocks must have one column per block")
     weights = np.where(np.isfinite(arr), bl[None, :], 0)
-    tot = np.nansum(arr * bl[None, :], axis=1) / np.sum(weights, axis=1)
+    numer = np.nansum(arr * bl[None, :], axis=1)
+    denom = np.sum(weights, axis=1)
+    tot = np.full(numer.shape, np.nan, dtype=float)
+    np.divide(numer, denom, out=tot, where=denom != 0)
     rel = bl / bl.sum()
     with np.errstate(invalid="ignore", divide="ignore"):
         return (tot[:, None] - arr * rel[None, :]) / (1 - rel[None, :])
@@ -717,28 +914,114 @@ def jack_vec_stats(loo_vec: Sequence[float], block_lengths: Sequence[int]) -> tu
     return float(est), float(var)
 
 
+@dataclass
+class _CountJackknife:
+    total: float
+    loo: np.ndarray
+    influence: np.ndarray
+    contributes: np.ndarray
+    n: float
+
+
+def _validate_resampling(resampling: str) -> str:
+    if resampling not in {"pairwise_counts", "nominal_blocks"}:
+        raise ValueError("resampling must be 'pairwise_counts' or 'nominal_blocks'")
+    return resampling
+
+
+def _require_pair_counts(blocks: F2Blocks, pop1: str, pop2: str) -> np.ndarray:
+    counts = blocks.pair_counts(pop1, pop2)
+    if counts is None:
+        raise ValueError(
+            "resampling='pairwise_counts' requires real per-pair SNP counts; "
+            "provide counts or use resampling='nominal_blocks'"
+        )
+    counts = np.asarray(counts, float)
+    vals = blocks.pair(pop1, pop2)
+    if np.any(np.isfinite(vals) & ~np.isfinite(counts)):
+        raise ValueError(f"Pair-specific SNP counts are incomplete for {pop1!r}, {pop2!r}")
+    return counts
+
+
+def _count_jackknife(block_ests: np.ndarray, n_per_block: np.ndarray) -> _CountJackknife:
+    """Count-weighted total, physical-block LOO values, and jackknife influence."""
+    ests = np.asarray(block_ests, float)
+    counts = np.asarray(n_per_block, float)
+    if ests.shape != counts.shape:
+        raise ValueError("block estimates and per-block counts must have the same shape")
+    valid = np.isfinite(ests) & np.isfinite(counts) & (counts > 0)
+    loo = np.full(ests.shape, np.nan, dtype=float)
+    influence = np.zeros(ests.shape, dtype=float)
+    if not np.any(valid):
+        return _CountJackknife(float("nan"), loo, np.full_like(influence, np.nan), valid, 0.0)
+
+    total_n = float(np.sum(counts[valid]))
+    total = float(np.sum(ests[valid] * counts[valid]) / total_n)
+    # A block with n=0 deletes no observations, so its LOO equals the full
+    # estimate and its influence is exactly zero.
+    loo[~valid] = total
+    remaining = total_n - counts[valid]
+    can_delete = remaining > 0
+    valid_i = np.flatnonzero(valid)
+    delete_i = valid_i[can_delete]
+    loo[delete_i] = (
+        total * total_n - ests[delete_i] * counts[delete_i]
+    ) / remaining[can_delete]
+    if len(delete_i) >= 2:
+        h = total_n / counts[delete_i]
+        tau = h * total - (h - 1.0) * loo[delete_i]
+        influence[delete_i] = (tau - total) / np.sqrt(h - 1.0)
+    else:
+        influence[valid] = np.nan
+    return _CountJackknife(total, loo, influence, valid, total_n)
+
+
 def _jack_stats_per_stat(block_ests: np.ndarray, n_per_block: np.ndarray) -> tuple[float, float]:
     # Per-stat block jackknife where each stat has its own per-block SNP count
     # (allsnps mode). Mirrors admixtools::est_to_loo_dat + jack_dat_stats, which
     # use the 'tot' form of cpp_jack_vec_stats. Blocks with n=0 or non-finite
     # block estimate are dropped.
-    e_full = np.asarray(block_ests, float)
-    n_full = np.asarray(n_per_block, float)
-    keep = np.isfinite(e_full) & (n_full > 0)
-    nk = int(keep.sum())
-    if nk < 2:
-        return (float(e_full[keep][0]), float("nan")) if nk == 1 else (float("nan"), float("nan"))
-    e = e_full[keep]
-    n = n_full[keep]
-    total = n.sum()
-    rel = n / total
-    tot = float(np.sum(e * n) / total)
-    loo = (tot - e * rel) / (1.0 - rel)
-    h = total / n
-    est = float(np.sum(tot - loo) + np.sum(loo * n) / total)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        xtau = (h * tot - (h - 1.0) * loo - est) ** 2 / (h - 1.0)
-    return est, float(np.mean(xtau))
+    jack = _count_jackknife(block_ests, n_per_block)
+    keep = jack.contributes & np.isfinite(jack.influence)
+    if int(np.sum(keep)) < 2:
+        return jack.total, float("nan")
+    return jack.total, float(np.mean(jack.influence[keep] ** 2))
+
+
+def _jack_ratio_stats(
+    block_num: np.ndarray,
+    block_den: np.ndarray,
+    n_per_block: np.ndarray,
+) -> tuple[float, float]:
+    """Jackknife a ratio using leave-one-block-out numerator/denominator sums."""
+    num = np.asarray(block_num, float)
+    den = np.asarray(block_den, float)
+    n = np.asarray(n_per_block, float)
+    keep = np.isfinite(num) & np.isfinite(den) & (n > 0)
+    num, den, n = num[keep], den[keep], n[keep]
+    if num.size == 0:
+        return float("nan"), float("nan")
+    total_num, total_den = float(num.sum()), float(den.sum())
+    total = float(np.divide(total_num, total_den)) if total_den != 0 else float("nan")
+    if num.size < 2 or not np.isfinite(total):
+        return float(total), float("nan")
+    total_n = float(n.sum())
+    loo_num = total_num - num
+    loo_den = total_den - den
+    loo = np.full(num.shape, np.nan, dtype=float)
+    np.divide(loo_num, loo_den, out=loo, where=loo_den != 0)
+    h = total_n / n
+    valid_loo = np.isfinite(loo) & np.isfinite(h) & (h > 1)
+    if not np.all(valid_loo):
+        return float(total), float("nan")
+    # Unequal-delete-block jackknife, matching the `tot` form used by
+    # admixtools::jack_dat_stats while recomputing the nonlinear ratio.
+    # Report the full-data ratio as the point estimate and use the
+    # bias-corrected jackknife center only for the variance calculation.
+    jack_center = float(np.sum(total - loo) + np.sum(loo * n) / total_n)
+    tau = h * total - (h - 1.0) * loo
+    var = float(np.mean((tau - jack_center) ** 2 / (h - 1.0)))
+    return float(total), var
 
 
 def jackknife_cov(loo_mat: np.ndarray, block_lengths: Sequence[int], est: Sequence[float] | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -783,7 +1066,24 @@ def block_covariance(stats: BlockStats | np.ndarray, block_lengths: Sequence[int
     return cov
 
 
-def f2(data, pop1=None, pop2=None, unique_only: bool = True, **kwargs) -> pd.DataFrame:
+def f2(
+    data,
+    pop1=None,
+    pop2=None,
+    unique_only: bool = True,
+    resampling: str = "pairwise_counts",
+    **kwargs,
+) -> pd.DataFrame:
+    """Pairwise f2 estimates with pair-count or nominal-block resampling.
+
+    By default, blocks are weighted by the number of finite SNPs for each
+    population pair and the result includes an ``n`` column. Set
+    ``resampling='nominal_blocks'`` to weight every pair by nominal block size.
+    """
+    resampling = _validate_resampling(resampling)
+    kwargs = dict(kwargs)
+    if resampling == "pairwise_counts":
+        kwargs.setdefault("remove_na", False)
     requested_pops = None
     requested_pops2 = None
     if pop1 is not None:
@@ -794,27 +1094,46 @@ def f2(data, pop1=None, pop2=None, unique_only: bool = True, **kwargs) -> pd.Dat
     p1s = blocks.pops1 if pop1 is None else [pop1] if isinstance(pop1, str) else list(pop1)
     p2s = blocks.pops2 if pop2 is None else [pop2] if isinstance(pop2, str) else list(pop2)
     pairs = list(combinations_with_replacement(p1s, 2)) if pop2 is None and unique_only else list(product(p1s, p2s))
-    loo = est_to_loo(blocks)
+    loo = est_to_loo(blocks) if resampling == "nominal_blocks" else None
     rows = []
     for a, b in pairs:
         pair_blocks = blocks.pair(a, b)
-        if np.isfinite(loo.pair(a, b)).sum() < 2:
-            weights = np.where(np.isfinite(pair_blocks), blocks.block_lengths, 0)
-            est = float(np.nansum(pair_blocks * weights) / np.sum(weights)) if np.sum(weights) else float("nan")
-            var = float("nan")
-        else:
+        if resampling == "nominal_blocks":
             est, var = jack_vec_stats(loo.pair(a, b), blocks.block_lengths)
-        rows.append({"pop1": a, "pop2": b, "est": est, "se": float(np.sqrt(var))})
+            row = {"pop1": a, "pop2": b, "est": est, "se": float(np.sqrt(var))}
+        else:
+            pair_counts = _require_pair_counts(blocks, a, b)
+            est, var = _jack_stats_per_stat(pair_blocks, pair_counts)
+            n = int(np.sum(pair_counts[np.isfinite(pair_blocks) & (pair_counts > 0)]))
+            row = {"pop1": a, "pop2": b, "est": est, "se": float(np.sqrt(var)), "n": n}
+        rows.append(row)
     return FStatsFrame(pd.DataFrame(rows))
 
 
-def fst(data, pop1=None, pop2=None, unique_only: bool = True, **kwargs) -> pd.DataFrame:
+def fst(
+    data,
+    pop1=None,
+    pop2=None,
+    unique_only: bool = True,
+    resampling: str = "pairwise_counts",
+    fst_aggregation: str = "block_ratios",
+    **kwargs,
+) -> pd.DataFrame:
     """Hudson FST per population pair, with LOO-jackknife standard errors
-    
-    denom = num + p1(1-p1)*n1/(n1-1) + p2(1-p2)*n2/(n2-1); fst = mean(num)/mean(denom).
+
+    raw_num = (p1-p2)^2; denom = raw_num + p1(1-p1) + p2(1-p2).
+    With apply_corr=True, num subtracts the two finite-sample corrections.
+    ``fst_aggregation='block_ratios'`` preserves the default behavior.
+    ``'pooled_components'`` combines cached numerator and denominator sums.
     `data` may be a genotype prefix, an fst-typed F2Blocks, or a precomputed-blocks
-    directory. Returns columns pop1, pop2, est, se.
+    directory. Pair-count resampling adds an ``n`` column.
     """
+    resampling = _validate_resampling(resampling)
+    if fst_aggregation not in {"block_ratios", "pooled_components"}:
+        raise ValueError("fst_aggregation must be 'block_ratios' or 'pooled_components'")
+    kwargs = dict(kwargs)
+    if resampling == "pairwise_counts":
+        kwargs.setdefault("remove_na", False)
     if isinstance(data, F2Blocks) and data.stat != "fst":
         raise ValueError(f"fst() requires F2Blocks with stat='fst' (got {data.stat!r}); recompute with fst=True")
     if isinstance(data, F4ModelCache) and data.blocks.stat != "fst":
@@ -829,22 +1148,109 @@ def fst(data, pop1=None, pop2=None, unique_only: bool = True, **kwargs) -> pd.Da
     p1s = blocks.pops1 if pop1 is None else [pop1] if isinstance(pop1, str) else list(pop1)
     p2s = blocks.pops2 if pop2 is None else [pop2] if isinstance(pop2, str) else list(pop2)
     pairs = list(combinations_with_replacement(p1s, 2)) if pop2 is None and unique_only else list(product(p1s, p2s))
-    loo = est_to_loo(blocks)
+    loo = est_to_loo(blocks) if resampling == "nominal_blocks" and fst_aggregation == "block_ratios" else None
     rows = []
     for a, b in pairs:
         pair_blocks = blocks.pair(a, b)
-        if np.isfinite(loo.pair(a, b)).sum() < 2:
-            weights = np.where(np.isfinite(pair_blocks), blocks.block_lengths, 0)
-            est = float(np.nansum(pair_blocks * weights) / np.sum(weights)) if np.sum(weights) else float("nan")
-            var = float("nan")
+        if a == b:
+            est = 0.0
+            var = 0.0 if np.isfinite(pair_blocks).sum() >= 2 else float("nan")
+        elif fst_aggregation == "pooled_components":
+            components = blocks.pair_fst_components(a, b)
+            if components is None:
+                raise ValueError(
+                    "fst_aggregation='pooled_components' requires numerator and denominator "
+                    "components; rebuild the FST cache"
+                )
+            weights = (
+                _require_pair_counts(blocks, a, b)
+                if resampling == "pairwise_counts"
+                else np.asarray(blocks.block_lengths, float)
+            )
+            est, var = _jack_ratio_stats(components[0], components[1], weights)
+        elif resampling == "pairwise_counts":
+            pair_counts = _require_pair_counts(blocks, a, b)
+            est, var = _jack_stats_per_stat(pair_blocks, pair_counts)
         else:
             est, var = jack_vec_stats(loo.pair(a, b), blocks.block_lengths)
-        rows.append({"pop1": a, "pop2": b, "est": est, "se": float(np.sqrt(var))})
+        row = {"pop1": a, "pop2": b, "est": est, "se": float(np.sqrt(var))}
+        if resampling == "pairwise_counts":
+            pair_counts = _require_pair_counts(blocks, a, b)
+            row["n"] = int(np.sum(pair_counts[np.isfinite(pair_blocks) & (pair_counts > 0)]))
+        rows.append(row)
     return FStatsFrame(pd.DataFrame(rows))
 
 
 def f3_from_f2(blocks: F2Blocks, pop1: str, pop2: str, pop3: str) -> np.ndarray:
     return (blocks.pair(pop1, pop2) + blocks.pair(pop1, pop3) - blocks.pair(pop2, pop3)) / 2
+
+
+def _influence_covariance(influence: np.ndarray, contributes: np.ndarray) -> np.ndarray:
+    influence = np.asarray(influence, float)
+    contributes = np.asarray(contributes, bool)
+    nstats = influence.shape[0]
+    cov = np.full((nstats, nstats), np.nan, dtype=float)
+    for i in range(nstats):
+        for j in range(i, nstats):
+            keep = (
+                contributes[i]
+                & contributes[j]
+                & np.isfinite(influence[i])
+                & np.isfinite(influence[j])
+            )
+            if int(np.sum(keep)) >= 2:
+                value = float(np.mean(influence[i, keep] * influence[j, keep]))
+                cov[i, j] = cov[j, i] = value
+    return cov
+
+
+def _pairwise_composite_jackknife(
+    blocks: F2Blocks,
+    specs: Sequence[Sequence[tuple[float, str, str]]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Combine count-weighted pair estimates into linear f3/f4 statistics.
+
+    Each physical block is deleted from every required population pair. Pair
+    blocks with no observations have zero influence rather than an undefined
+    ``0 * inf`` pseudovalue.
+    """
+    npairs: dict[tuple[str, str], _CountJackknife] = {}
+    nblocks = blocks.data.shape[2]
+    nstats = len(specs)
+    totals = np.full(nstats, np.nan, dtype=float)
+    loo = np.full((nstats, nblocks), np.nan, dtype=float)
+    influence = np.full((nstats, nblocks), np.nan, dtype=float)
+    contributes = np.zeros((nstats, nblocks), dtype=bool)
+
+    for stat_i, spec in enumerate(specs):
+        combined: dict[tuple[str, str], float] = {}
+        for coefficient, pop1, pop2 in spec:
+            key = (pop1, pop2)
+            combined[key] = combined.get(key, 0.0) + float(coefficient)
+        combined = {key: coefficient for key, coefficient in combined.items() if coefficient != 0}
+
+        pair_jacks = []
+        failed = False
+        for key, coefficient in combined.items():
+            if key not in npairs:
+                counts = _require_pair_counts(blocks, *key)
+                npairs[key] = _count_jackknife(blocks.pair(*key), counts)
+            jack = npairs[key]
+            if not np.isfinite(jack.total):
+                failed = True
+                break
+            pair_jacks.append((coefficient, jack))
+        if failed or not pair_jacks:
+            continue
+
+        totals[stat_i] = sum(coefficient * jack.total for coefficient, jack in pair_jacks)
+        loo[stat_i] = sum(coefficient * jack.loo for coefficient, jack in pair_jacks)
+        influence[stat_i] = sum(coefficient * jack.influence for coefficient, jack in pair_jacks)
+        for coefficient, jack in pair_jacks:
+            if coefficient != 0:
+                contributes[stat_i] |= jack.contributes
+
+    return totals, loo, influence, _influence_covariance(influence, contributes)
 
 
 def _all_block_pops(blocks: F2Blocks) -> list[str]:
@@ -890,21 +1296,42 @@ def qp3pop(
     pop2=None,
     pop3=None,
     unique_only: bool = True,
+    resampling: str = "pairwise_counts",
     verbose: bool = True,
     **kwargs,
 ) -> pd.DataFrame:
+    resampling = _validate_resampling(resampling)
+    kwargs = dict(kwargs)
+    if resampling == "pairwise_counts":
+        kwargs.setdefault("remove_na", False)
     combos = _f3_combinations(data, pop1, pop2, pop3, unique_only)
     if unique_only:
         combos = combos.drop_duplicates().reset_index(drop=True)
     pops = list(dict.fromkeys(list(combos["pop1"]) + list(combos["pop2"]) + list(combos["pop3"])))
     _log(f"Loading f2 data for {len(pops) * len(pops)} population pairs", verbose)
     blocks = get_f2(data, pops=pops, **kwargs)
-    loo = est_to_loo(blocks)
+    if resampling == "nominal_blocks":
+        loo = est_to_loo(blocks)
+        pairwise_est = pairwise_cov = None
+    else:
+        specs = [
+            [
+                (0.5, row.pop1, row.pop2),
+                (0.5, row.pop1, row.pop3),
+                (-0.5, row.pop2, row.pop3),
+            ]
+            for row in combos.itertuples(index=False)
+        ]
+        pairwise_est, _, _, pairwise_cov = _pairwise_composite_jackknife(blocks, specs)
     rows = []
     _log(f"Computing f3 for {len(combos)} population combinations", verbose)
-    for row in combos.itertuples(index=False):
-        vals = f3_from_f2(loo, row.pop1, row.pop2, row.pop3)
-        est, var = jack_vec_stats(vals, blocks.block_lengths)
+    for stat_i, row in enumerate(combos.itertuples(index=False)):
+        if resampling == "nominal_blocks":
+            vals = f3_from_f2(loo, row.pop1, row.pop2, row.pop3)
+            est, var = jack_vec_stats(vals, blocks.block_lengths)
+        else:
+            est = float(pairwise_est[stat_i])
+            var = float(pairwise_cov[stat_i, stat_i])
         se = float(np.sqrt(var))
         z = est / se if np.isfinite(se) and se != 0 else float("nan")
         p = math.erfc(abs(z) / math.sqrt(2)) if np.isfinite(z) else float("nan")
@@ -1023,8 +1450,12 @@ def _f4_direct_blocks_from_afs(
 
     effective_lengths = np.nanmax(snp_counts, axis=0)
     effective_lengths = np.where(effective_lengths > 0, effective_lengths, block_lengths).astype(float)
-    loo = stats_to_loo(out, effective_lengths)
-    cov, est = jackknife_cov(loo, effective_lengths)
+    jacks = [_count_jackknife(out[i], snp_counts[i]) for i in range(nstats)]
+    est = np.asarray([jack.total for jack in jacks], float)
+    loo = np.asarray([jack.loo for jack in jacks], float)
+    influence = np.asarray([jack.influence for jack in jacks], float)
+    contributes = np.asarray([jack.contributes for jack in jacks], bool)
+    cov = _influence_covariance(influence, contributes)
     rows = combos.drop(columns=["model"]) if set(combos["model"]) == {1} else combos
     stats = BlockStats(rows=rows.reset_index(drop=True), blocks=out, block_lengths=effective_lengths, stat="f4", loo=loo, est=est, cov=cov)
     stats.snp_counts = snp_counts
@@ -1093,9 +1524,12 @@ def f4_stats(
     keep_loo: bool = True,
     covariance: bool = True,
     allsnps: bool = False,
+    resampling: str = "pairwise_counts",
     verbose: bool = True,
     **kwargs,
 ) -> BlockStats:
+    resampling = _validate_resampling(resampling)
+    kwargs = dict(kwargs)
     if afprod and allsnps:
         raise ValueError("afprod=True and allsnps=True together are not supported")
     combos = _f4_combinations(pop1, pop2, pop3, pop4, comb)
@@ -1134,20 +1568,38 @@ def f4_stats(
         if not covariance:
             stats.cov = None
         return stats
+    if resampling == "pairwise_counts":
+        kwargs.setdefault("remove_na", False)
     pops1 = list(dict.fromkeys(list(combos["pop1"]) + list(combos["pop2"])))
     pops2 = list(dict.fromkeys(list(combos["pop3"]) + list(combos["pop4"])))
     _log(f"Loading {'ap' if afprod else 'f2'} data for {len(pops1) * len(pops2)} population pairs", verbose)
     blocks = get_f2(data, pops=pops1, pops2=pops2, afprod=afprod, **kwargs)
-    loo_blocks = est_to_loo(blocks)
     stat_blocks = []
-    stat_loo = []
     _log(f"Computing f4 for {len(combos)} population combinations", verbose)
     for row in combos.itertuples(index=False):
         stat_blocks.append(f4_from_f2(blocks, row.pop1, row.pop2, row.pop3, row.pop4))
-        stat_loo.append(f4_from_f2(loo_blocks, row.pop1, row.pop2, row.pop3, row.pop4))
     stat_blocks = np.asarray(stat_blocks, float)
-    stat_loo = np.asarray(stat_loo, float)
-    cov, est = jackknife_cov(stat_loo, blocks.block_lengths)
+    if resampling == "nominal_blocks":
+        loo_blocks = est_to_loo(blocks)
+        stat_loo = np.asarray(
+            [
+                f4_from_f2(loo_blocks, row.pop1, row.pop2, row.pop3, row.pop4)
+                for row in combos.itertuples(index=False)
+            ],
+            float,
+        )
+        cov, est = jackknife_cov(stat_loo, blocks.block_lengths)
+    else:
+        specs = [
+            [
+                (0.5, row.pop1, row.pop4),
+                (0.5, row.pop2, row.pop3),
+                (-0.5, row.pop1, row.pop3),
+                (-0.5, row.pop2, row.pop4),
+            ]
+            for row in combos.itertuples(index=False)
+        ]
+        est, stat_loo, _, cov = _pairwise_composite_jackknife(blocks, specs)
     return BlockStats(
         rows=combos,
         blocks=stat_blocks if keep_blocks else None,
@@ -1720,9 +2172,18 @@ def qpadm_multi(
     qpadm_keys = {"fudge", "fudge_twice", "iterations", "getcov", "return_f4", "return_stats", "return_cov"}
     if "allsnps" not in kwargs:
         kwargs["allsnps"] = _default_genotype_allsnps(data)
+    resampling = _validate_resampling(kwargs.pop("resampling", "pairwise_counts"))
     qpadm_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in qpadm_keys}
-    source = f4_model_cache(data, models, verbose=verbose, **kwargs) if use_cache else data
-    qp_kwargs = qpadm_kwargs if use_cache else {**kwargs, **qpadm_kwargs}
+    source = (
+        f4_model_cache(data, models, resampling=resampling, verbose=verbose, **kwargs)
+        if use_cache
+        else data
+    )
+    qp_kwargs = (
+        {**qpadm_kwargs, "resampling": resampling}
+        if use_cache
+        else {**kwargs, **qpadm_kwargs, "resampling": resampling}
+    )
     rows = []
     for model_i, row in enumerate(models.itertuples(index=False), start=1):
         res = qpadm(
