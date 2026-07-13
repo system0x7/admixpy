@@ -144,11 +144,11 @@ qpAdm can be run the same way from a Python REPL:
 QpAdmResult(target='Sardinian')
 
 weights:
-                           left weight       se     z
-                       Turkey_N  0.686  0.01307 52.45
-      Russia_Samara_EBA_Yamnaya  0.102   0.0119  8.54
-Luxembourg_Loschbour_Mesolithic  0.119 0.006403 18.57
-               Iran_GanjDareh_N  0.094  0.01317  7.11
+                           left weight     se     z
+                       Turkey_N  0.686  0.013 52.45
+      Russia_Samara_EBA_Yamnaya  0.102  0.012  8.54
+Luxembourg_Loschbour_Mesolithic  0.119 0.0064 18.57
+               Iran_GanjDareh_N  0.094  0.013  7.11
 
 rankdrop:
 f4rank dof   chisq         p  p_nested

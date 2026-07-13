@@ -285,7 +285,7 @@ class QpAdmResult:
             if col in {"p", "p_nested"}:
                 out[col] = out[col].map(_format_pvalue)
             elif col == "se":
-                out[col] = out[col].map(lambda x: _format_significant(x, 4))
+                out[col] = out[col].map(lambda x: _format_significant(x, 2))
             else:
                 decimals = 3 if col == "weight" else 2
                 out[col] = out[col].map(lambda x, d=decimals: _format_number(x, d))
