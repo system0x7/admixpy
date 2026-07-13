@@ -28,6 +28,15 @@ Check that the package imports:
 python -c "import admixpy; print(admixpy.__file__)"
 ```
 
+### Updating an existing clone
+
+```bash
+cd /path/to/AdmixPy
+git pull --ff-only
+```
+
+After updating, run the two installation commands in Setup again.
+
 ## Alternative
 
 If you only want to install the dependencies without installing the package:
@@ -133,27 +142,28 @@ qpAdm can be run the same way from a Python REPL:
 >>> res = a.qpadm(prefix, target=target, left=left, right=right)
 >>> res
 QpAdmResult(target='Sardinian')
+
 weights:
-                           left weight   se     z
-                       Turkey_N  0.686 0.01299 52.82
-      Russia_Samara_EBA_Yamnaya  0.101 0.01187  8.51
-Luxembourg_Loschbour_Mesolithic  0.119 0.00638 18.64
-               Iran_GanjDareh_N  0.094 0.01309  7.18
+                           left weight       se     z
+                       Turkey_N  0.686  0.01307 52.45
+      Russia_Samara_EBA_Yamnaya  0.102   0.0119  8.54
+Luxembourg_Loschbour_Mesolithic  0.119 0.006403 18.57
+               Iran_GanjDareh_N  0.094  0.01317  7.11
 
 rankdrop:
- f4rank dof      chisq         p  p_nested
-      3   2       0.46     0.796 4.53e-244
-      2   6    1133.78 1.02e-241         0
-      1  12    3349.77         0         0
-      0  20    6886.04         0       NaN
+f4rank dof   chisq         p  p_nested
+     3   2    0.53     0.769 9.39e-242
+     2   6 1123.16 2.03e-239         0
+     1  12 3317.58         0         0
+     0  20 6849.91         0       NaN
 
 popdrop:
-  pat                                                                    dropped  f4rank  dof      chisq          p  feasible status
- 0000                                                                                  3    2       0.46      0.796      True   PASS
- 0001                                                           Iran_GanjDareh_N       2    3      60.12   5.54e-13      True   FAIL
- 0010                                            Luxembourg_Loschbour_Mesolithic       2    3     372.86   1.67e-80     False   FAIL
- 0100                                                  Russia_Samara_EBA_Yamnaya       2    3      72.69   1.13e-15      True   FAIL
- 1000                                                                   Turkey_N       2    3     834.89  1.17e-180     False   FAIL
+ pat                                                                    dropped f4rank dof   chisq         p  feasible status
+0000                                                                                 3   2    0.53     0.769      True   PASS
+0001                                                           Iran_GanjDareh_N      2   3   58.58  1.18e-12      True   FAIL
+0010                                            Luxembourg_Loschbour_Mesolithic      2   3   370.2  6.29e-80     False   FAIL
+0100                                                  Russia_Samara_EBA_Yamnaya      2   3   73.09  9.29e-16      True   FAIL
+1000                                                                   Turkey_N      2   3  825.23 1.46e-178     False   FAIL
  ...
 ```
 
