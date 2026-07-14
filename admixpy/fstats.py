@@ -2831,6 +2831,15 @@ def _popdrop_nested_chain(out: pd.DataFrame, nsources: int):
 
 def _qinv_from_cov(cov: np.ndarray, fudge: float, fudge_twice: bool = False) -> np.ndarray:
     cov = np.asarray(cov, float).copy()
+    if cov.ndim != 2 or cov.shape[0] != cov.shape[1]:
+        raise ValueError("Covariance matrix must be square")
+    nonfinite = int(np.size(cov) - np.isfinite(cov).sum())
+    if nonfinite:
+        suffix = "entry" if nonfinite == 1 else "entries"
+        raise ValueError(
+            f"Covariance matrix contains {nonfinite} non-finite {suffix}; "
+            "cannot compute its inverse"
+        )
     cov[np.diag_indices_from(cov)] += fudge * np.trace(cov)
     if fudge_twice:
         cov[np.diag_indices_from(cov)] += fudge * np.trace(cov)
@@ -2838,6 +2847,66 @@ def _qinv_from_cov(cov: np.ndarray, fudge: float, fudge_twice: bool = False) -> 
         return linalg.inv(cov)
     except linalg.LinAlgError:
         return linalg.pinv(cov)
+
+
+def _validate_qpadm_f4(qpw: QpWaveStats, *, allsnps: bool) -> None:
+    estimates = np.asarray(qpw.matrix, float).reshape(-1)
+    cov = np.asarray(qpw.cov, float)
+    expected_shape = (len(estimates), len(estimates))
+    if cov.shape != expected_shape:
+        raise ValueError(
+            f"qpAdm expected an f4 covariance matrix with shape {expected_shape}, "
+            f"but received {cov.shape}"
+        )
+
+    bad_est = ~np.isfinite(estimates)
+    bad_cov = ~np.isfinite(cov)
+    if not np.any(bad_est) and not np.any(bad_cov):
+        return
+
+    affected = bad_est.copy()
+    if np.any(bad_cov):
+        affected |= np.any(bad_cov, axis=0) | np.any(bad_cov, axis=1)
+    affected_i = np.flatnonzero(affected)
+    rows = qpw.f4.rows.reset_index(drop=True)
+    labels = []
+    for stat_i in affected_i[:8]:
+        if stat_i < len(rows) and {"pop1", "pop2", "pop3", "pop4"}.issubset(rows.columns):
+            row = rows.iloc[stat_i]
+            labels.append(
+                f"  - f4({row['pop1']}, {row['pop2']}; {row['pop3']}, {row['pop4']})"
+            )
+        else:
+            labels.append(f"  - f4 contrast {stat_i}")
+    if len(affected_i) > len(labels):
+        labels.append(f"  - ... and {len(affected_i) - len(labels)} more")
+
+    problems = []
+    if np.any(bad_est):
+        nbad = int(bad_est.sum())
+        problems.append(f"{nbad} non-finite f4 estimate{'s' if nbad != 1 else ''}")
+    if np.any(bad_cov):
+        nbad = int(bad_cov.sum())
+        problems.append(f"{nbad} non-finite covariance entr{'ies' if nbad != 1 else 'y'}")
+    hint = (
+        "This usually means that an affected contrast has fewer than two usable "
+        "jackknife blocks or insufficient population coverage."
+    )
+    if not allsnps:
+        hint += (
+            " With allsnps=False, it can also mean that an unbiased f2 correction "
+            "is unavailable, which is common for pseudohaploid singletons. Inspect "
+            "the listed populations or use allsnps=True for direct-genotype f4 "
+            "statistics."
+        )
+    raise ValueError(
+        "qpAdm cannot fit the model because its f4 inputs contain "
+        + " and ".join(problems)
+        + ". Affected contrasts:\n"
+        + "\n".join(labels)
+        + "\n"
+        + hint
+    )
 
 
 def _weights_covariance(qpw: QpWaveStats, qinv: np.ndarray, rank: int, fudge: float, iterations: int) -> np.ndarray:
@@ -2891,6 +2960,7 @@ def qpadm(
         kwargs["allsnps"] = _default_genotype_allsnps(data)
     left_full = [target] + [p for p in sources if p != target]
     qpw = qpwave_f4stats(data, left=left_full, right=right, verbose=verbose, **kwargs)
+    _validate_qpadm_f4(qpw, allsnps=bool(kwargs["allsnps"]))
     xmat = qpw.matrix
     qinv = _qinv_from_cov(qpw.cov, fudge=fudge, fudge_twice=fudge_twice)
     rank = len(sources) - 1

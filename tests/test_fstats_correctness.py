@@ -2,12 +2,16 @@ import tempfile
 import unittest
 import warnings
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 from admixpy.fstats import (
+    BlockStats,
     F2Blocks,
+    QpWaveStats,
+    _qinv_from_cov,
     _hudson_fst,
     _hudson_fst_components,
     afs_to_f2_blocks,
@@ -18,6 +22,7 @@ from admixpy.fstats import (
     jackknife_cov,
     mats_to_f2arr,
     qp3pop,
+    qpadm,
     qpdstat,
     read_f2,
     stats_to_loo,
@@ -800,6 +805,57 @@ class NominalMissingBlockTests(unittest.TestCase):
         )
         self.assertAlmostEqual(est[0], 2.0)
         self.assertAlmostEqual(cov[0, 0], 1.0)
+
+
+class QpAdmValidationTests(unittest.TestCase):
+    def test_covariance_inverse_rejects_nonfinite_values_explicitly(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "Covariance matrix contains 1 non-finite entry; cannot compute its inverse",
+        ):
+            _qinv_from_cov(np.array([[np.nan]]), fudge=0.0001)
+
+    def test_qpadm_error_names_contrasts_with_nonfinite_covariance(self):
+        rows = pd.DataFrame(
+            [
+                {"pop1": "S1", "pop2": "Target", "pop3": "R1", "pop4": "R0"},
+                {"pop1": "S2", "pop2": "Target", "pop3": "R1", "pop4": "R0"},
+            ]
+        )
+        f4 = BlockStats(
+            rows=rows,
+            blocks=np.zeros((2, 2)),
+            block_lengths=np.ones(2),
+            stat="f4",
+            loo=np.zeros((2, 2)),
+            est=np.array([0.1, 0.2]),
+            cov=np.array([[1.0, np.nan], [np.nan, 1.0]]),
+        )
+        qpw = QpWaveStats(
+            f4=f4,
+            left=["Target", "S1", "S2"],
+            right=["R0", "R1"],
+            left_base="Target",
+            right_base="R0",
+            row_pops=["S1", "S2"],
+            col_pops=["R1"],
+        )
+        with patch("admixpy.fstats.qpwave_f4stats", return_value=qpw):
+            with self.assertRaises(ValueError) as ctx:
+                qpadm(
+                    "unused",
+                    "Target",
+                    ["S1", "S2"],
+                    ["R0", "R1"],
+                    allsnps=False,
+                    verbose=False,
+                )
+        message = str(ctx.exception)
+        self.assertIn("qpAdm cannot fit the model", message)
+        self.assertIn("2 non-finite covariance entries", message)
+        self.assertIn("f4(S1, Target; R1, R0)", message)
+        self.assertIn("f4(S2, Target; R1, R0)", message)
+        self.assertIn("pseudohaploid singletons", message)
 
 
 if __name__ == "__main__":
