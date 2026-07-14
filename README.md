@@ -105,11 +105,12 @@ population repeated across the two factors of `f3(A; B, C)`. Thus the target
 | Common SNP set across a model | Direct f3/f4, qpWave, and qpAdm | `allsnps=False` |
 | Use only polymorphic sites | Direct f-statistics | `poly_only=True` (drops non-polymorphic sites) |
 
-Direct f3 and f4 genotype calculations stream by physical SNP block by default.
-They make two sequential passes over the genotype file for memory efficiency. Set `stream=False` to
-read the genotype file once and hold the complete SNP-by-population
-allele-frequency and count tables in memory. This is faster for datasets
-that fit in RAM.
+Direct f3 and f4 genotype calculations (including the f4 calculations
+for qpAdm and qpWave), stream by physical SNP block by default. They make
+two sequential passes over the genotype file for memory efficiency. Set
+`stream=False` to read the genotype file once and hold the complete
+SNP-by-population allele-frequency and count tables in memory. This is faster
+for datasets that fit in RAM.
 
 Lower-level helpers are also exported for direct use, including allele-frequency
 conversion (`anygeno_to_afs`, `eigenstrat_to_afs`, `plink_to_afs`,
