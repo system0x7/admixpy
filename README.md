@@ -91,7 +91,7 @@ population repeated across the two factors of `f3(A; B, C)`. Thus the target
 
 | Data | Scope | Recommended setting |
 |---|---|---|
-| Known modern diploid data | All direct genotype statistics | `adjust_pseudohaploid=False` if known diploid (otherwise auto-detected); `apply_corr=True` |
+| Known modern diploid data | All direct genotype statistics | Keep defaults (ploidy auto-detected), or set `adjust_pseudohaploid=False` to force known diploid data |
 | Ancient or mixed-ploidy data | All direct genotype statistics | `adjust_pseudohaploid=True, apply_corr=True` (auto-detected per sample) |
 | ADMIXTOOLS2-normalized direct f3 | f3 only | `outgroupmode=False` (default) |
 | Raw/original outgroup f3 | f3 only | `outgroupmode=True` |
