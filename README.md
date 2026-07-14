@@ -84,11 +84,6 @@ heterozygosity. Set `outgroupmode=True` to return the unnormalized f3 numerator;
 that raw mode is directly comparable to f2-derived f3 and to original `qp3Pop`
 outgroup mode after removing the latter's factor of 1000.
 
-The relevant small-sample quantity is the number of independent allele
-observations, not merely the number of individuals. AdmixPy corrects every
-population repeated across the two factors of `f3(A; B, C)`. Thus the target
-`A` is corrected, and in `f3(A; B, B)` source `B` is corrected as well.
-
 | Data | Scope | Recommended setting |
 |---|---|---|
 | Known modern diploid data | All direct genotype statistics | Keep defaults (ploidy auto-detected), or set `adjust_pseudohaploid=False` to force known diploid data |
