@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 import math
 import re
 import warnings
@@ -671,6 +671,94 @@ def anygeno_to_afs(
     if format == "eigenstrat":
         return eigenstrat_to_afs(pref, inds, pops, adjust_pseudohaploid, chunk_size=chunk_size, verbose=verbose)
     raise ValueError("format must be 'plink', 'eigenstrat', 'packedancestrymap', or 'tgeno'")
+
+
+def iter_geno_to_afs(
+    pref: str | Path,
+    inds=None,
+    pops=None,
+    format: str | None = None,
+    adjust_pseudohaploid=True,
+    chunk_size: int = 10_000,
+    verbose: bool = True,
+) -> Iterator[AfData]:
+    """Yield population allele frequencies in bounded SNP chunks.
+
+    Unlike :func:`anygeno_to_afs`, this does not materialize full SNP-by-
+    population matrices. All supported formats use the same sample matching,
+    pseudohaploid detection, and allele-count conversion as their full readers.
+    """
+    pref = str(pref)
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+    if format is None:
+        if all(Path(pref + ext).exists() for ext in (".bed", ".bim", ".fam")):
+            format = "plink"
+        elif all(Path(pref + ext).exists() for ext in (".geno", ".snp", ".ind")):
+            ind0 = read_ind(pref + ".ind")
+            snp0 = read_snp(pref + ".snp")
+            format = detect_geno_format(pref + ".geno", nind=len(ind0), nsnp=len(snp0))
+        elif Path(pref + ".tgeno").exists() and all(Path(pref + ext).exists() for ext in (".snp", ".ind")):
+            ind0 = read_ind(pref + ".ind")
+            snp0 = read_snp(pref + ".snp")
+            format = detect_geno_format(pref + ".tgeno", nind=len(ind0), nsnp=len(snp0))
+        else:
+            raise FileNotFoundError("Genotype files not found")
+    format = format.lower()
+
+    if format == "plink":
+        individuals = _read_table(pref + ".fam", ["population", "iid", "p1", "p2", "sex", "pheno"])
+        snp = read_snp(pref + ".bim", plink=True)
+        geno_path = pref + ".bed"
+
+        def read_range(first, last, keep):
+            return _read_plink_bed(geno_path, len(snp), len(individuals), first, last, keep)
+
+    elif format in {"eigenstrat", "packedancestrymap", "tgeno"}:
+        individuals = read_ind(pref + ".ind")
+        snp = read_snp(pref + ".snp")
+        geno_path = _tgeno_path(pref) if format == "tgeno" else pref + ".geno"
+        if format == "eigenstrat":
+            def read_range(first, last, keep):
+                return _read_eigenstrat_geno(geno_path, len(individuals), first, last, keep)
+        elif format == "packedancestrymap":
+            def read_range(first, last, keep):
+                return _read_packed_geno(geno_path, len(snp), len(individuals), first, last, keep)
+        else:
+            def read_range(first, last, keep):
+                return _read_tgeno(geno_path, len(snp), len(individuals), first, last, keep)
+    else:
+        raise ValueError("format must be 'plink', 'eigenstrat', 'packedancestrymap', or 'tgeno'")
+
+    indvec, popnames = _match_samples(individuals.iid, individuals.population, inds, pops)
+    keep_inds = np.where(indvec >= 0)[0]
+    indvec_sub = indvec[keep_inds]
+    nsnp = len(snp)
+    _log(
+        f"Streaming {format} data: {nsnp} SNPs, {len(individuals)} samples, "
+        f"{len(keep_inds)} selected samples, {len(popnames)} populations",
+        verbose,
+    )
+    ntest = _ntest(adjust_pseudohaploid, nsnp)
+    if adjust_pseudohaploid and ntest > 0:
+        _log(f"Detecting pseudohaploid samples from first {ntest} SNPs", verbose)
+        test_geno = read_range(1, ntest, keep_inds)
+        ploidy = _detect_pseudohaploid(test_geno, indvec_sub, adjust_pseudohaploid)
+    else:
+        ploidy = np.full(len(indvec_sub), 2.0)
+
+    nchunks = math.ceil(nsnp / chunk_size) if nsnp else 0
+    for chunk_i, start in enumerate(range(1, nsnp + 1, chunk_size), start=1):
+        stop = min(start + chunk_size - 1, nsnp)
+        _log_chunk(format, chunk_i, nchunks, start, stop, verbose)
+        geno = read_range(start, stop, keep_inds)
+        afs, counts = _geno_to_af_arrays(geno, indvec_sub, popnames, ploidy)
+        chunk_snp = snp.iloc[start - 1:stop].reset_index(drop=True)
+        yield AfData(
+            pd.DataFrame(afs, index=chunk_snp.SNP, columns=popnames),
+            pd.DataFrame(counts, index=chunk_snp.SNP, columns=popnames),
+            chunk_snp,
+        )
 
 
 def weighted_row_means(values: np.ndarray, weights: np.ndarray) -> np.ndarray:

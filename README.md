@@ -78,22 +78,44 @@ statistic from its available SNPs. Use `allsnps=False` to restrict the model to
 SNPs shared across the required populations. Precomputed f2 input keeps the
 standard f2-based behavior.
 
-Direct genotype `f3` also defaults to `allsnps=True` and is calculated per SNP
-rather than reconstructed from pairwise f2. For distinct populations in
-`f3(A; B, C)`, bias correction is required only for the repeated target `A`, so
-a single pseudohaploid sample is allowed in source position `B` or `C` but not
-in target position `A`. If the same source is used for `B` and `C`, that source
-also needs at least two allele observations because `f3(A; B, B)` is
-`f2(A, B)`. A singleton target therefore returns `NaN` with `n=0` when
-`apply_corr=True` (default). Set `apply_corr=False` to calculate the finite raw
-estimate while accepting its sampling bias.
+Direct genotype `f3` also defaults to `allsnps=True` and is calculated per SNP.
+By default, its corrected numerator is divided by unbiased target
+heterozygosity. Set `outgroupmode=True` to return the unnormalized f3 numerator;
+that raw mode is directly comparable to f2-derived f3 and to original `qp3Pop`
+outgroup mode after removing the latter's factor of 1000.
+
+The relevant small-sample quantity is the number of independent allele
+observations, not merely the number of individuals. AdmixPy corrects every
+population repeated across the two factors of `f3(A; B, C)`. Thus the target
+`A` is corrected, and in `f3(A; B, B)` source `B` is corrected as well.
+
+| Data | Scope | Recommended setting |
+|---|---|---|
+| Known modern diploid data | All direct genotype statistics | `adjust_pseudohaploid=False` if known diploid (otherwise auto-detected); `apply_corr=True` |
+| Ancient or mixed-ploidy data | All direct genotype statistics | `adjust_pseudohaploid=True, apply_corr=True` (auto-detected per sample) |
+| ADMIXTOOLS2-normalized direct f3 | f3 only | `outgroupmode=False` (default) |
+| Raw/original outgroup f3 | f3 only | `outgroupmode=True` |
+| Diploid singleton target or repeated source | f3 only | Keep `apply_corr=True`; two called alleles make correction possible |
+| Pseudohaploid singleton used only as a distinct source | f3 only | Allowed with `apply_corr=True` because it occurs linearly |
+| Pseudohaploid singleton target or repeated source | f3 only | Unbiased correction is not possible; affected SNPs are excluded |
+| Intentionally biased singleton estimate | f3 only | `outgroupmode=True, apply_corr=False`; exploratory/legacy |
+| Missingness differs among populations or blocks | f2, FST, f3, and cached f4 | `resampling="pairwise_counts"` (default) |
+| In-memory blocks without SNP counts | Precomputed-block workflows | `resampling="nominal_blocks"`; incomplete on-disk caches must be rebuilt |
+| Maximum available SNPs per combination | Direct f3/f4, qpWave, and qpAdm | `allsnps=True` (direct-genotype default) |
+| Common SNP set across a model | Direct f3/f4, qpWave, and qpAdm | `allsnps=False` |
+| Only segregating sites | Direct f-statistics | `poly_only=True`; equal non-boundary frequencies are retained |
+
+Direct f3 and f4 genotype calculations stream by physical SNP block by default.
+They make two sequential passes over the genotype file so filtering and block
+boundaries remain identical while memory stays bounded. Set `stream=False` to
+use the materialized SNP-by-population path.
 
 Lower-level helpers are also exported for direct use, including allele-frequency
 conversion (`anygeno_to_afs`, `eigenstrat_to_afs`, `plink_to_afs`,
 `packedancestrymap_to_afs`, `tgeno_to_afs`), f2 block IO and access
 (`get_f2`, `read_f2`, `write_f2`), and block/statistical utilities such as
-`f3_stats_from_geno`, `block_covariance`, `jackknife_cov`, `stats_to_loo`, and
-`est_to_loo`.
+`iter_geno_to_afs`, `f3_stats_from_geno`, `block_covariance`,
+`jackknife_cov`, `stats_to_loo`, and `est_to_loo`.
 
 ### SNP selection, missingness, and small samples
 

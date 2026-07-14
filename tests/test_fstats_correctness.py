@@ -14,10 +14,13 @@ from admixpy.fstats import (
     f2,
     f2_from_geno,
     fst,
+    _f3_direct_blocks_from_afs,
+    jackknife_cov,
     mats_to_f2arr,
     qp3pop,
     qpdstat,
     read_f2,
+    stats_to_loo,
     write_f2,
 )
 from admixpy.genotypes import AfData
@@ -424,6 +427,19 @@ class RawF4Tests(unittest.TestCase):
         self.assertTrue(np.isfinite(cached.loc[0, "se"]))
         self.assertNotAlmostEqual(raw.loc[0, "est"], cached.loc[0, "est"])
 
+    def test_streamed_and_materialized_direct_f4_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_complete_eigenstrat(Path(tmp))
+            streamed = qpdstat(
+                pref, "A", "B", "C", "D", blgsize=0.04, chunk_size=3,
+                adjust_pseudohaploid=False, verbose=False,
+            )
+            materialized = qpdstat(
+                pref, "A", "B", "C", "D", blgsize=0.04, stream=False,
+                adjust_pseudohaploid=False, verbose=False,
+            )
+        pd.testing.assert_frame_equal(streamed, materialized)
+
 
 class DirectF3Tests(unittest.TestCase):
     @staticmethod
@@ -470,11 +486,75 @@ class DirectF3Tests(unittest.TestCase):
         )
         return pref
 
+    @staticmethod
+    def _pack_high_bit_codes(codes, record_len):
+        raw = bytearray(record_len)
+        for i, code in enumerate(codes):
+            raw[i // 4] |= int(code) << (6 - 2 * (i % 4))
+        return bytes(raw)
+
+    @staticmethod
+    def _write_binary_equivalents(eigen_pref: Path, root: Path) -> list[Path]:
+        lines = eigen_pref.with_suffix(".geno").read_text().splitlines()
+        geno = np.array(
+            [[np.nan if c == "9" else int(c) for c in row] for row in lines],
+            dtype=float,
+        )
+        ind_lines = eigen_pref.with_suffix(".ind").read_text().splitlines()
+        snp_rows = [line.split() for line in eigen_pref.with_suffix(".snp").read_text().splitlines()]
+        nsnp, nind = geno.shape
+
+        packed = root / "equiv_packed"
+        packed.with_suffix(".ind").write_text(eigen_pref.with_suffix(".ind").read_text())
+        packed.with_suffix(".snp").write_text(eigen_pref.with_suffix(".snp").read_text())
+        record_len = max(48, (nind + 3) // 4)
+        header = f"GENO {nind} {nsnp} 0 0".encode().ljust(record_len, b"\0")
+        payload = [header]
+        for row in geno:
+            codes = [3 if np.isnan(g) else int(g) for g in row]
+            payload.append(DirectF3Tests._pack_high_bit_codes(codes, record_len))
+        packed.with_suffix(".geno").write_bytes(b"".join(payload))
+
+        tgeno = root / "equiv_tgeno"
+        tgeno.with_suffix(".ind").write_text(eigen_pref.with_suffix(".ind").read_text())
+        tgeno.with_suffix(".snp").write_text(eigen_pref.with_suffix(".snp").read_text())
+        record_len = max(48, (nsnp + 3) // 4)
+        header = f"TGENO {nind} {nsnp} 0 0".encode().ljust(48, b"\0")
+        payload = [header]
+        for col in geno.T:
+            codes = [3 if np.isnan(g) else int(g) for g in col]
+            payload.append(DirectF3Tests._pack_high_bit_codes(codes, record_len))
+        tgeno.with_suffix(".tgeno").write_bytes(b"".join(payload))
+
+        plink = root / "equiv_plink"
+        fam = []
+        for line in ind_lines:
+            iid, sex, pop = line.split()
+            fam.append(f"{pop} {iid} 0 0 {1 if sex == 'M' else 2} -9\n")
+        plink.with_suffix(".fam").write_text("".join(fam))
+        plink.with_suffix(".bim").write_text(
+            "".join(
+                f"{chrom} {snp} {cm} {pos} {a1} {a2}\n"
+                for snp, chrom, cm, pos, a1, a2 in snp_rows
+            )
+        )
+        bed = bytearray(b"\x6c\x1b\x01")
+        plink_code = {0: 3, 1: 2, 2: 0}
+        bytes_per_snp = (nind + 3) // 4
+        for row in geno:
+            raw = bytearray(bytes_per_snp)
+            for i, g in enumerate(row):
+                code = 1 if np.isnan(g) else plink_code[int(g)]
+                raw[i // 4] |= code << (2 * (i % 4))
+            bed.extend(raw)
+        plink.with_suffix(".bed").write_bytes(bytes(bed))
+        return [packed, tgeno, plink]
+
     def test_singleton_source_is_finite_and_matches_corrected_repeated_f4(self):
         with tempfile.TemporaryDirectory() as tmp:
             pref = self._write_singleton_source_eigenstrat(Path(tmp))
-            f3 = qp3pop(pref, "A", "B", "C", blgsize=0.05, verbose=False)
-            swapped = qp3pop(pref, "A", "C", "B", blgsize=0.05, verbose=False)
+            f3 = qp3pop(pref, "A", "B", "C", blgsize=0.05, outgroupmode=True, verbose=False)
+            swapped = qp3pop(pref, "A", "C", "B", blgsize=0.05, outgroupmode=True, verbose=False)
             repeated_f4 = qpdstat(
                 pref,
                 "A",
@@ -492,6 +572,59 @@ class DirectF3Tests(unittest.TestCase):
         self.assertAlmostEqual(f3.loc[0, "se"], swapped.loc[0, "se"])
         self.assertAlmostEqual(f3.loc[0, "est"], repeated_f4.loc[0, "est"])
         self.assertAlmostEqual(f3.loc[0, "se"], repeated_f4.loc[0, "se"])
+
+    def test_repeated_source_matches_corrected_f2_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = RawF4Tests._write_complete_eigenstrat(Path(tmp))
+            repeated_f3 = qp3pop(
+                pref, "A", "B", "B", blgsize=0.04, outgroupmode=True,
+                adjust_pseudohaploid=False, verbose=False,
+            )
+            repeated_f4 = qpdstat(
+                pref, "A", "B", "A", "B", blgsize=0.04,
+                adjust_pseudohaploid=False, verbose=False,
+            )
+        self.assertAlmostEqual(repeated_f3.loc[0, "est"], repeated_f4.loc[0, "est"])
+        self.assertAlmostEqual(repeated_f3.loc[0, "se"], repeated_f4.loc[0, "se"])
+
+    def test_target_equal_to_source_is_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = RawF4Tests._write_complete_eigenstrat(Path(tmp))
+            out = qp3pop(
+                pref, "A", "A", "C", blgsize=0.04, outgroupmode=True,
+                adjust_pseudohaploid=False, verbose=False,
+            )
+        self.assertAlmostEqual(out.loc[0, "est"], 0.0)
+        self.assertAlmostEqual(out.loc[0, "se"], 0.0)
+
+    def test_default_normalizes_by_target_heterozygosity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = RawF4Tests._write_complete_eigenstrat(Path(tmp))
+            normalized = qp3pop(
+                pref,
+                "A",
+                "B",
+                "C",
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            raw = qp3pop(
+                pref,
+                "A",
+                "B",
+                "C",
+                blgsize=0.04,
+                outgroupmode=True,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+        # Frozen analytical values for this fixture. The normalized value is
+        # the block-jackknife ratio used by ADMIXTOOLS 2; raw is its
+        # outgroupmode=TRUE numerator scale.
+        self.assertAlmostEqual(normalized.loc[0, "est"], 0.0625)
+        self.assertAlmostEqual(raw.loc[0, "est"], 5 / 36)
+        self.assertNotAlmostEqual(normalized.loc[0, "est"], raw.loc[0, "est"])
 
     def test_singleton_target_remains_unestimable_when_correcting(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -514,6 +647,7 @@ class DirectF3Tests(unittest.TestCase):
                 allsnps=False,
                 poly_only=False,
                 maxmiss=0,
+                outgroupmode=True,
                 adjust_pseudohaploid=False,
                 verbose=False,
             )
@@ -526,6 +660,7 @@ class DirectF3Tests(unittest.TestCase):
                 allsnps=False,
                 poly_only=False,
                 maxmiss=0,
+                outgroupmode=True,
                 adjust_pseudohaploid=False,
                 resampling="nominal_blocks",
                 verbose=False,
@@ -554,6 +689,116 @@ class DirectF3Tests(unittest.TestCase):
         self.assertAlmostEqual(direct_nominal.loc[0, "est"], cached_nominal.loc[0, "est"])
         self.assertAlmostEqual(direct_nominal.loc[0, "se"], cached_nominal.loc[0, "se"])
         self.assertNotIn("n", direct_nominal.columns)
+
+    def test_poly_only_retains_equal_segregating_frequencies(self):
+        snps = pd.DataFrame(
+            {
+                "SNP": ["s1", "s2", "s3", "s4"],
+                "CHR": [1, 1, 1, 1],
+                "cm": [0.00, 0.01, 0.06, 0.07],
+                "POS": [1, 2, 3, 4],
+                "A1": ["A"] * 4,
+                "A2": ["G"] * 4,
+            }
+        )
+        afs = pd.DataFrame(
+            {
+                "A": [0.5, 0.0, 1.0, 0.5],
+                "B": [0.5, 0.0, 1.0, 0.5],
+                "C": [0.5, 0.0, 1.0, 0.5],
+            },
+            index=snps["SNP"],
+        )
+        counts = pd.DataFrame(4.0, index=afs.index, columns=afs.columns)
+        stats = _f3_direct_blocks_from_afs(
+            AfData(afs, counts, snps),
+            pd.DataFrame([{"pop1": "A", "pop2": "B", "pop3": "C"}]),
+            blgsize=0.05,
+            poly_only=True,
+            outgroupmode=True,
+            verbose=False,
+        )
+        self.assertEqual(int(stats.snp_counts.sum()), 2)
+        self.assertTrue(np.isfinite(stats.est[0]))
+
+    def test_normalized_f3_weights_numerator_and_denominator(self):
+        snps = pd.DataFrame(
+            {
+                "SNP": ["s1", "s2"],
+                "CHR": [1, 1],
+                "cm": [0.00, 0.01],
+                "POS": [1, 2],
+                "A1": ["A", "A"],
+                "A2": ["G", "G"],
+            }
+        )
+        afs = pd.DataFrame(
+            {"A": [0.25, 0.5], "B": [0.0, 0.25], "C": [1.0, 0.75]},
+            index=snps["SNP"],
+        )
+        counts = pd.DataFrame(4.0, index=afs.index, columns=afs.columns)
+        stats = _f3_direct_blocks_from_afs(
+            AfData(afs, counts, snps),
+            pd.DataFrame([{"pop1": "A", "pop2": "B", "pop3": "C"}]),
+            blgsize=0.05,
+            snpwt=[2.0, 3.0],
+            verbose=False,
+        )
+        # Unbiased target heterozygosities are 1/2 and 2/3, so the
+        # mean of their weighted components is (2*1/2 + 3*2/3) / 2.
+        self.assertAlmostEqual(stats.ratio_den[0, 0], 1.5)
+
+    def test_streamed_and_materialized_paths_match(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = RawF4Tests._write_complete_eigenstrat(Path(tmp))
+            streamed = qp3pop(
+                pref, "A", "B", "C", blgsize=0.04, chunk_size=3,
+                adjust_pseudohaploid=False, verbose=False,
+            )
+            materialized = qp3pop(
+                pref, "A", "B", "C", blgsize=0.04, stream=False,
+                adjust_pseudohaploid=False, verbose=False,
+            )
+        pd.testing.assert_frame_equal(streamed, materialized)
+
+    def test_all_supported_formats_give_same_direct_f3(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            eigen = RawF4Tests._write_complete_eigenstrat(root)
+            prefixes = [eigen] + self._write_binary_equivalents(eigen, root)
+            results = [
+                qp3pop(
+                    pref, "A", "B", "C", blgsize=0.04, chunk_size=3,
+                    adjust_pseudohaploid=False, verbose=False,
+                )
+                for pref in prefixes
+            ]
+        for result in results[1:]:
+            pd.testing.assert_frame_equal(result, results[0])
+
+
+class NominalMissingBlockTests(unittest.TestCase):
+    def test_absent_block_deletion_leaves_full_estimate(self):
+        loo = stats_to_loo(np.array([[1.0, np.nan, 3.0]]), [1, 10, 1])
+        np.testing.assert_allclose(loo, [[3.0, 2.0, 1.0]])
+
+    def test_single_finite_block_has_no_deletable_estimate(self):
+        loo = stats_to_loo(np.array([[np.nan, 2.0, np.nan]]), [1, 10, 1])
+        self.assertEqual(loo[0, 0], 2.0)
+        self.assertTrue(np.isnan(loo[0, 1]))
+        self.assertEqual(loo[0, 2], 2.0)
+
+    def test_covariance_excludes_noncontributing_nominal_blocks(self):
+        blocks = np.array([[1.0, np.nan, 3.0]])
+        lengths = np.array([1.0, 10.0, 1.0])
+        loo = stats_to_loo(blocks, lengths)
+        cov, est = jackknife_cov(
+            loo,
+            lengths,
+            contributes=np.isfinite(blocks),
+        )
+        self.assertAlmostEqual(est[0], 2.0)
+        self.assertAlmostEqual(cov[0, 0], 1.0)
 
 
 if __name__ == "__main__":

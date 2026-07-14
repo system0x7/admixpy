@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "admixpy"
-version = "0.2.2"
+version = "0.2.3"
 description = "Fast Python implementation of ADMIXTOOLS-style f-statistics, qpadm, and qpwave"
 requires-python = ">=3.10"
 dependencies = [

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from scipy import linalg, optimize, stats as scipy_stats
 
-from .genotypes import AfData, anygeno_to_afs, discard_from_aftable, get_block_lengths, is_polymorphic
+from .genotypes import AfData, anygeno_to_afs, discard_from_aftable, get_block_lengths, is_polymorphic, iter_geno_to_afs
 
 
 def _log(message: str, verbose: bool):
@@ -190,11 +190,17 @@ class BlockStats:
 
     def to_frame(self, round_z: int | None = None, round_p: int | None = None) -> pd.DataFrame:
         out = self.rows.copy()
+        ratio_num = getattr(self, "ratio_num", None)
         # In allsnps mode the per-stat per-block SNP counts are attached as
         # `snp_counts`; in that case report each stat with its own block sizes
         # (matches admixtools::jack_dat_stats, the formula used by qpdstat-allsnps).
         snp_counts = getattr(self, "snp_counts", None)
-        if snp_counts is not None and self.blocks is not None:
+        if ratio_num is not None:
+            est_vec = np.asarray(self.est, float)
+            se_vec = self.se
+            with np.errstate(invalid="ignore", divide="ignore"):
+                z = est_vec / se_vec
+        elif snp_counts is not None and self.blocks is not None:
             n = len(self.rows)
             est_vec = np.empty(n, dtype=float)
             se_vec = np.empty(n, dtype=float)
@@ -907,9 +913,17 @@ def stats_to_loo(blocks: np.ndarray, block_lengths: Sequence[int]) -> np.ndarray
     denom = np.sum(weights, axis=1)
     tot = np.full(numer.shape, np.nan, dtype=float)
     np.divide(numer, denom, out=tot, where=denom != 0)
-    rel = bl / bl.sum()
+    # Each statistic can be absent from a different set of physical blocks.
+    # Normalize nominal weights over its finite blocks, and treat deleting an
+    # absent block as deleting no observations (LOO equals the full estimate).
+    rel = np.zeros_like(arr, dtype=float)
+    np.divide(weights, denom[:, None], out=rel, where=denom[:, None] != 0)
+    out = np.broadcast_to(tot[:, None], arr.shape).copy()
+    present = np.isfinite(arr) & (rel < 1)
     with np.errstate(invalid="ignore", divide="ignore"):
-        return (tot[:, None] - arr * rel[None, :]) / (1 - rel[None, :])
+        out[present] = ((tot[:, None] - arr * rel) / (1 - rel))[present]
+    out[np.isfinite(arr) & (rel >= 1)] = np.nan
+    return out
 
 
 def jack_vec_stats(loo_vec: Sequence[float], block_lengths: Sequence[int]) -> tuple[float, float]:
@@ -1036,7 +1050,84 @@ def _jack_ratio_stats(
     return float(total), var
 
 
-def jackknife_cov(loo_mat: np.ndarray, block_lengths: Sequence[int], est: Sequence[float] | None = None) -> tuple[np.ndarray, np.ndarray]:
+def _ratio_block_jackknife(
+    block_num_means: np.ndarray,
+    block_den_means: np.ndarray,
+    block_weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Jackknife ratios of pooled block components.
+
+    This mirrors admixtools' ``est_to_loo_dat`` followed by
+    ``jack_dat_stats`` for the numerator/denominator direct-f3 path. Inputs
+    are statistic-by-block matrices of component means and their effective
+    block weights (normally contributing SNP counts).
+    """
+    num = np.asarray(block_num_means, float)
+    den = np.asarray(block_den_means, float)
+    weights = np.asarray(block_weights, float)
+    if num.ndim == 1:
+        num, den, weights = num[None, :], den[None, :], weights[None, :]
+    if num.shape != den.shape or num.shape != weights.shape:
+        raise ValueError("ratio numerator, denominator, and weights must have matching shapes")
+
+    nstats, nblocks = num.shape
+    estimates = np.full(nstats, np.nan, dtype=float)
+    loo = np.full((nstats, nblocks), np.nan, dtype=float)
+    influence = np.full((nstats, nblocks), np.nan, dtype=float)
+    contributes = np.zeros((nstats, nblocks), dtype=bool)
+
+    for stat_i in range(nstats):
+        valid = (
+            np.isfinite(num[stat_i])
+            & np.isfinite(den[stat_i])
+            & np.isfinite(weights[stat_i])
+            & (weights[stat_i] > 0)
+        )
+        contributes[stat_i] = valid
+        if not np.any(valid):
+            continue
+        w = weights[stat_i, valid]
+        nsum = float(w.sum())
+        num_sums = num[stat_i, valid] * w
+        den_sums = den[stat_i, valid] * w
+        total_num = float(num_sums.sum())
+        total_den = float(den_sums.sum())
+        full = float(np.divide(total_num, total_den)) if total_den != 0 else float("nan")
+
+        valid_idx = np.flatnonzero(valid)
+        remaining_w = nsum - w
+        remaining_den = total_den - den_sums
+        can_delete = (remaining_w > 0) & (remaining_den != 0)
+        delete_idx = valid_idx[can_delete]
+        loo[stat_i, delete_idx] = (
+            total_num - num_sums[can_delete]
+        ) / remaining_den[can_delete]
+
+        finite = np.isfinite(loo[stat_i])
+        if int(finite.sum()) < 2:
+            estimates[stat_i] = full
+            continue
+        lw = weights[stat_i, finite]
+        lv = loo[stat_i, finite]
+        finite_n = float(lw.sum())
+        delete_weight = 1.0 - lw / finite_n
+        jack_total = float(np.average(lv, weights=delete_weight))
+        jack_est = float(np.sum(jack_total - lv) + np.average(lv, weights=lw))
+        estimates[stat_i] = jack_est
+        h = finite_n / lw
+        tau = h * jack_total - (h - 1.0) * lv
+        influence[stat_i, finite] = (tau - jack_est) / np.sqrt(h - 1.0)
+
+    cov = _influence_covariance(influence, contributes)
+    return estimates, loo, influence, cov
+
+
+def jackknife_cov(
+    loo_mat: np.ndarray,
+    block_lengths: Sequence[int],
+    est: Sequence[float] | None = None,
+    contributes: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     loo = np.asarray(loo_mat, float)
     if loo.ndim == 1:
         loo = loo[None, :]
@@ -1046,17 +1137,36 @@ def jackknife_cov(loo_mat: np.ndarray, block_lengths: Sequence[int], est: Sequen
             loo = loo.T
         else:
             raise ValueError("loo_mat must have one column per block")
-    h = bl.sum() / bl
+    if contributes is None:
+        contributes = np.isfinite(loo)
+    else:
+        contributes = np.asarray(contributes, bool)
+        if contributes.ndim == 1:
+            contributes = contributes[None, :]
+        if contributes.shape != loo.shape:
+            raise ValueError("contributes must have the same shape as loo_mat")
     if est is None:
-        est_vec = np.array([jack_vec_stats(row, bl)[0] for row in loo])
+        est_vec = np.array(
+            [jack_vec_stats(row[keep], bl[keep])[0] for row, keep in zip(loo, contributes)]
+        )
     else:
         est_vec = np.asarray(est, float)
     cov = np.full((loo.shape[0], loo.shape[0]), np.nan)
     for i in range(loo.shape[0]):
         for j in range(i, loo.shape[0]):
-            keep = np.isfinite(loo[i]) & np.isfinite(loo[j])
+            keep = (
+                contributes[i]
+                & contributes[j]
+                & np.isfinite(loo[i])
+                & np.isfinite(loo[j])
+            )
             if np.any(keep):
-                val = np.mean((est_vec[i] - loo[i, keep]) * (est_vec[j] - loo[j, keep]) * (h[keep] - 1))
+                h = bl[keep].sum() / bl[keep]
+                val = np.mean(
+                    (est_vec[i] - loo[i, keep])
+                    * (est_vec[j] - loo[j, keep])
+                    * (h - 1)
+                )
                 cov[i, j] = cov[j, i] = val
     return cov, est_vec
 
@@ -1064,11 +1174,17 @@ def jackknife_cov(loo_mat: np.ndarray, block_lengths: Sequence[int], est: Sequen
 def block_covariance(stats: BlockStats | np.ndarray, block_lengths: Sequence[int] | None = None) -> np.ndarray:
     if isinstance(stats, BlockStats):
         loo = stats.loo
+        contributes = None if stats.blocks is None else np.isfinite(stats.blocks)
         if loo is None:
             if stats.blocks is None:
                 raise ValueError("BlockStats must contain loo or blocks to estimate covariance")
             loo = stats_to_loo(stats.blocks, stats.block_lengths)
-        cov, est = jackknife_cov(loo, stats.block_lengths, stats.est)
+        cov, est = jackknife_cov(
+            loo,
+            stats.block_lengths,
+            stats.est,
+            contributes=contributes,
+        )
         stats.cov = cov
         stats.est = est
         return cov
@@ -1315,8 +1431,10 @@ def qp3pop(
     """Compute f3(A; B, C) statistics.
 
     Genotype prefixes use a direct per-SNP estimator, which corrects only
-    populations repeated across both contrasts. F2Blocks and cache directories
-    retain the f2-derived estimator
+    populations repeated across both contrasts. By default, that numerator is
+    normalized by unbiased target heterozygosity; pass ``outgroupmode=True``
+    for raw f3 units. F2Blocks and cache directories retain the unnormalized,
+    f2-derived estimator.
     """
     resampling = _validate_resampling(resampling)
     kwargs = dict(kwargs)
@@ -1339,8 +1457,21 @@ def qp3pop(
         )
         if resampling == "nominal_blocks":
             nominal_lengths = np.asarray(stats.nominal_block_lengths, float)
-            loo = stats_to_loo(stats.blocks, nominal_lengths)
-            cov, est = jackknife_cov(loo, nominal_lengths)
+            if getattr(stats, "ratio_num", None) is not None:
+                nominal_weights = np.broadcast_to(nominal_lengths, stats.ratio_num.shape).copy()
+                nominal_weights[stats.snp_counts <= 0] = 0
+                est, loo, _, cov = _ratio_block_jackknife(
+                    stats.ratio_num,
+                    stats.ratio_den,
+                    nominal_weights,
+                )
+            else:
+                loo = stats_to_loo(stats.blocks, nominal_lengths)
+                cov, est = jackknife_cov(
+                    loo,
+                    nominal_lengths,
+                    contributes=np.isfinite(stats.blocks),
+                )
             stats.block_lengths = nominal_lengths
             stats.loo = loo
             stats.est = est
@@ -1437,6 +1568,7 @@ def _f4_direct_blocks_from_afs(
     snpwt: Sequence[float] | None = None,
     apply_corr: bool = True,
     stat_name: str = "f4",
+    normalize_by_target_het: bool = False,
     verbose: bool = True,
 ) -> BlockStats:
     cols = ["pop1", "pop2", "pop3", "pop4"]
@@ -1476,6 +1608,7 @@ def _f4_direct_blocks_from_afs(
     block_lengths = get_block_lengths(afdat.snpfile, blgsize)
     nstats = len(combos)
     out = np.full((nstats, len(block_lengths)), np.nan, dtype=float)
+    denominator = np.full_like(out, np.nan) if normalize_by_target_het else None
     snp_counts = np.zeros((nstats, len(block_lengths)), dtype=float)
     snpwt = None if snpwt is None else np.asarray(snpwt, float)
     if snpwt is not None and len(snpwt) != arr.shape[0]:
@@ -1489,7 +1622,10 @@ def _f4_direct_blocks_from_afs(
             use = np.isfinite(arr[:, model_idx]).all(axis=1)
             if poly_only:
                 vals = arr[:, model_idx]
-                use &= np.nanmax(vals, axis=1) != np.nanmin(vals, axis=1)
+                # Direct ADMIXTOOLS statistics retain segregating sites even
+                # when every population has the same non-boundary frequency.
+                # Only sites fixed at 0 or fixed at 1 are monomorphic here.
+                use &= (np.nanmax(vals, axis=1) > 0) & (np.nanmin(vals, axis=1) < 1)
             use_by_model[model] = use
 
     start = 0
@@ -1510,12 +1646,19 @@ def _f4_direct_blocks_from_afs(
                 finite_vals = vals[use]
                 if finite_vals.size:
                     use_idx = np.where(use)[0]
-                    use[use_idx] &= np.max(finite_vals, axis=1) != np.min(finite_vals, axis=1)
+                    use[use_idx] &= (
+                        (np.max(finite_vals, axis=1) > 0)
+                        & (np.min(finite_vals, axis=1) < 1)
+                    )
             correction = correction_coefficients[stat_i]
             required = np.flatnonzero(correction != 0)
             if apply_corr and required.size:
                 use &= np.isfinite(count_block[:, required]).all(axis=1)
                 use &= (count_block[:, required] > 1).all(axis=1)
+            if normalize_by_target_het:
+                target_idx = p[0]
+                use &= np.isfinite(count_block[:, target_idx])
+                use &= count_block[:, target_idx] > 1
             if not np.any(use):
                 continue
             f4vals = (vals[use, 0] - vals[use, 1]) * (vals[use, 2] - vals[use, 3])
@@ -1529,21 +1672,40 @@ def _f4_direct_blocks_from_afs(
             if snpwt is not None:
                 f4vals = f4vals * snpwt[start:stop][use]
             out[stat_i, b] = float(np.mean(f4vals))
+            if normalize_by_target_het:
+                target_p = block[use, target_idx]
+                target_n = count_block[use, target_idx]
+                target_het = 2.0 * target_p * (1.0 - target_p) * target_n / (target_n - 1.0)
+                if snpwt is not None:
+                    # Normalized f3 is a ratio of two SNP-weighted sums.  Apply
+                    # the same optional outgroup weight to both components.
+                    target_het = target_het * snpwt[start:stop][use]
+                denominator[stat_i, b] = float(np.mean(target_het))
             snp_counts[stat_i, b] = int(use.sum())
         start = stop
 
     effective_lengths = np.nanmax(snp_counts, axis=0)
     effective_lengths = np.where(effective_lengths > 0, effective_lengths, block_lengths).astype(float)
-    jacks = [_count_jackknife(out[i], snp_counts[i]) for i in range(nstats)]
-    est = np.asarray([jack.total for jack in jacks], float)
-    loo = np.asarray([jack.loo for jack in jacks], float)
-    influence = np.asarray([jack.influence for jack in jacks], float)
-    contributes = np.asarray([jack.contributes for jack in jacks], bool)
-    cov = _influence_covariance(influence, contributes)
+    if normalize_by_target_het:
+        ratio_blocks = np.full_like(out, np.nan)
+        np.divide(out, denominator, out=ratio_blocks, where=denominator != 0)
+        est, loo, _, cov = _ratio_block_jackknife(out, denominator, snp_counts)
+        result_blocks = ratio_blocks
+    else:
+        jacks = [_count_jackknife(out[i], snp_counts[i]) for i in range(nstats)]
+        est = np.asarray([jack.total for jack in jacks], float)
+        loo = np.asarray([jack.loo for jack in jacks], float)
+        influence = np.asarray([jack.influence for jack in jacks], float)
+        contributes = np.asarray([jack.contributes for jack in jacks], bool)
+        cov = _influence_covariance(influence, contributes)
+        result_blocks = out
     rows = combos.drop(columns=["model"]) if set(combos["model"]) == {1} else combos
-    stats = BlockStats(rows=rows.reset_index(drop=True), blocks=out, block_lengths=effective_lengths, stat=stat_name, loo=loo, est=est, cov=cov)
+    stats = BlockStats(rows=rows.reset_index(drop=True), blocks=result_blocks, block_lengths=effective_lengths, stat=stat_name, loo=loo, est=est, cov=cov)
     stats.snp_counts = snp_counts
     stats.nominal_block_lengths = np.asarray(block_lengths, float)
+    if normalize_by_target_het:
+        stats.ratio_num = out
+        stats.ratio_den = denominator
     return stats
 
 
@@ -1567,9 +1729,35 @@ def f4_stats_from_geno(
     chunk_size: int = 10_000,
     tgeno_chunked: bool = False,
     verbose: bool = True,
+    stream: bool = True,
 ) -> BlockStats:
     cols = ["pop1", "pop2", "pop3", "pop4"]
     pops = list(dict.fromkeys(popcombs[cols].to_numpy().reshape(-1)))
+    if outpop is not None and outpop not in pops:
+        pops.append(outpop)
+    if maxmiss is None:
+        maxmiss = 1 if allsnps else 0
+    if stream:
+        return _f4_stats_from_geno_stream(
+            pref,
+            popcombs,
+            blgsize=blgsize,
+            maxmiss=maxmiss,
+            minmaf=minmaf,
+            maxmaf=maxmaf,
+            outpop=outpop,
+            transitions=transitions,
+            transversions=transversions,
+            auto_only=auto_only,
+            keepsnps=keepsnps,
+            allsnps=allsnps,
+            poly_only=poly_only,
+            apply_corr=apply_corr,
+            format=format,
+            adjust_pseudohaploid=adjust_pseudohaploid,
+            chunk_size=chunk_size,
+            verbose=verbose,
+        )
     afdat = anygeno_to_afs(
         pref,
         pops=pops,
@@ -1580,8 +1768,6 @@ def f4_stats_from_geno(
         tgeno_chunked=tgeno_chunked,
     )
     _log("Filtering SNPs", verbose)
-    if maxmiss is None:
-        maxmiss = 1 if allsnps else 0
     afdat = discard_from_aftable(
         afdat,
         maxmiss=maxmiss,
@@ -1613,6 +1799,7 @@ def _f3_direct_blocks_from_afs(
     poly_only: bool = False,
     snpwt: Sequence[float] | None = None,
     apply_corr: bool = True,
+    outgroupmode: bool = False,
     verbose: bool = True,
 ) -> BlockStats:
     cols = ["pop1", "pop2", "pop3"]
@@ -1639,10 +1826,347 @@ def _f3_direct_blocks_from_afs(
         snpwt=snpwt,
         apply_corr=apply_corr,
         stat_name="f3",
+        normalize_by_target_het=not outgroupmode,
         verbose=verbose,
     )
     stats.rows = combos[cols].copy()
     stats.stat = "f3"
+    return stats
+
+
+def _concat_afdata(parts: Sequence[AfData]) -> AfData:
+    if not parts:
+        raise ValueError("Cannot concatenate an empty allele-frequency block")
+    snp = pd.concat([part.snpfile for part in parts], ignore_index=True)
+    afs = pd.concat([part.afs.reset_index(drop=True) for part in parts], ignore_index=True)
+    counts = pd.concat([part.counts.reset_index(drop=True) for part in parts], ignore_index=True)
+    afs.index = snp["SNP"]
+    counts.index = snp["SNP"]
+    return AfData(afs, counts, snp)
+
+
+def _f4_stats_from_geno_stream(
+    pref: str | Path,
+    popcombs: pd.DataFrame,
+    *,
+    blgsize: float,
+    maxmiss: float,
+    minmaf: float,
+    maxmaf: float,
+    outpop: str | None,
+    transitions: bool,
+    transversions: bool,
+    auto_only: bool,
+    keepsnps,
+    allsnps: bool,
+    poly_only: bool,
+    apply_corr: bool,
+    format: str | None,
+    adjust_pseudohaploid,
+    chunk_size: int,
+    verbose: bool,
+) -> BlockStats:
+    """Two-pass, bounded-memory direct f4 computation."""
+    cols = ["pop1", "pop2", "pop3", "pop4"]
+    combos = popcombs.reset_index(drop=True).copy()
+    pops = list(dict.fromkeys(combos[cols].to_numpy().reshape(-1)))
+    if outpop is not None and outpop not in pops:
+        pops.append(outpop)
+
+    keep_chunks: list[np.ndarray] = []
+    retained_snp_parts: list[pd.DataFrame] = []
+    _log("Filtering SNPs (streaming pass 1/2)", verbose)
+    for chunk in iter_geno_to_afs(
+        pref,
+        pops=pops,
+        format=format,
+        adjust_pseudohaploid=adjust_pseudohaploid,
+        chunk_size=chunk_size,
+        verbose=verbose,
+    ):
+        try:
+            filter_snp = chunk.snpfile.copy()
+            filter_snp["_stream_row"] = np.arange(len(filter_snp))
+            filtered = discard_from_aftable(
+                AfData(chunk.afs, chunk.counts, filter_snp),
+                maxmiss=maxmiss,
+                minmaf=minmaf,
+                maxmaf=maxmaf,
+                outpop=outpop,
+                transitions=transitions,
+                transversions=transversions,
+                auto_only=auto_only,
+                keepsnps=keepsnps,
+                poly_only=False,
+            )
+            keep = np.zeros(len(chunk.snpfile), dtype=bool)
+            keep[filtered.snpfile["_stream_row"].to_numpy(int)] = True
+            retained_snp_parts.append(chunk.snpfile.loc[keep].reset_index(drop=True))
+        except ValueError as err:
+            if str(err) != "No SNPs remain after filtering":
+                raise
+            keep = np.zeros(len(chunk.snpfile), dtype=bool)
+        keep_chunks.append(keep)
+    if not retained_snp_parts:
+        raise ValueError("No SNPs remain after filtering")
+
+    retained_snp = pd.concat(retained_snp_parts, ignore_index=True)
+    block_lengths = get_block_lengths(retained_snp, blgsize)
+    nstats, nblocks = len(combos), len(block_lengths)
+    block_estimates = np.full((nstats, nblocks), np.nan, dtype=float)
+    snp_counts = np.zeros((nstats, nblocks), dtype=float)
+
+    _log("Computing direct f4 (streaming pass 2/2)", verbose)
+    second_stream = iter_geno_to_afs(
+        pref,
+        pops=pops,
+        format=format,
+        adjust_pseudohaploid=adjust_pseudohaploid,
+        chunk_size=chunk_size,
+        verbose=verbose,
+    )
+    block_i = 0
+    block_remaining = int(block_lengths[0]) if nblocks else 0
+    block_parts: list[AfData] = []
+
+    def finish_block(parts: list[AfData], index: int) -> None:
+        block_stats = _f4_direct_blocks_from_afs(
+            _concat_afdata(parts),
+            combos,
+            blgsize=float("inf"),
+            allsnps=allsnps,
+            poly_only=poly_only,
+            apply_corr=apply_corr,
+            verbose=False,
+        )
+        block_estimates[:, index] = block_stats.blocks[:, 0]
+        snp_counts[:, index] = block_stats.snp_counts[:, 0]
+
+    for chunk_i, chunk in enumerate(second_stream):
+        keep = keep_chunks[chunk_i]
+        if not np.any(keep):
+            continue
+        kept_snp = chunk.snpfile.loc[keep].reset_index(drop=True)
+        kept_afs = chunk.afs.iloc[keep].copy()
+        kept_counts = chunk.counts.iloc[keep].copy()
+        kept_afs.index = kept_snp["SNP"]
+        kept_counts.index = kept_snp["SNP"]
+        offset = 0
+        while offset < len(kept_snp):
+            take = min(block_remaining, len(kept_snp) - offset)
+            stop = offset + take
+            part_snp = kept_snp.iloc[offset:stop].reset_index(drop=True)
+            part_afs = kept_afs.iloc[offset:stop].copy()
+            part_counts = kept_counts.iloc[offset:stop].copy()
+            part_afs.index = part_snp["SNP"]
+            part_counts.index = part_snp["SNP"]
+            block_parts.append(AfData(part_afs, part_counts, part_snp))
+            block_remaining -= take
+            offset = stop
+            if block_remaining == 0:
+                finish_block(block_parts, block_i)
+                block_i += 1
+                block_parts = []
+                if block_i < nblocks:
+                    block_remaining = int(block_lengths[block_i])
+    if block_parts or block_i != nblocks:
+        raise RuntimeError("Streaming f4 block assembly did not consume the retained SNP layout")
+
+    effective_lengths = np.nanmax(snp_counts, axis=0)
+    effective_lengths = np.where(effective_lengths > 0, effective_lengths, block_lengths).astype(float)
+    jacks = [_count_jackknife(block_estimates[i], snp_counts[i]) for i in range(nstats)]
+    est = np.asarray([jack.total for jack in jacks], float)
+    loo = np.asarray([jack.loo for jack in jacks], float)
+    influence = np.asarray([jack.influence for jack in jacks], float)
+    contributes = np.asarray([jack.contributes for jack in jacks], bool)
+    cov = _influence_covariance(influence, contributes)
+    rows = combos.drop(columns=["model"]) if "model" in combos and set(combos["model"]) == {1} else combos
+    stats = BlockStats(rows.reset_index(drop=True), block_estimates, effective_lengths, "f4", loo, est, cov)
+    stats.snp_counts = snp_counts
+    stats.nominal_block_lengths = np.asarray(block_lengths, float)
+    return stats
+
+
+def _f3_stats_from_geno_stream(
+    pref: str | Path,
+    popcombs: pd.DataFrame,
+    *,
+    blgsize: float,
+    maxmiss: float,
+    minmaf: float,
+    maxmaf: float,
+    minac2: bool | int,
+    outpop: str | None,
+    outpop_scale: bool,
+    transitions: bool,
+    transversions: bool,
+    auto_only: bool,
+    keepsnps,
+    allsnps: bool,
+    poly_only: bool,
+    apply_corr: bool,
+    outgroupmode: bool,
+    format: str | None,
+    adjust_pseudohaploid,
+    chunk_size: int,
+    verbose: bool,
+) -> BlockStats:
+    """Two-pass, bounded-memory direct f3 computation.
+
+    The first pass stores only a retained-SNP mask and metadata so block
+    boundaries remain identical to the materialized implementation. The
+    second pass computes one physical block at a time.
+    """
+    cols = ["pop1", "pop2", "pop3"]
+    pops = list(dict.fromkeys(popcombs[cols].to_numpy().reshape(-1)))
+    if outpop is not None and outpop not in pops:
+        pops.append(outpop)
+
+    keep_chunks: list[np.ndarray] = []
+    retained_snp_parts: list[pd.DataFrame] = []
+    first_stream = iter_geno_to_afs(
+        pref,
+        pops=pops,
+        format=format,
+        adjust_pseudohaploid=adjust_pseudohaploid,
+        chunk_size=chunk_size,
+        verbose=verbose,
+    )
+    _log("Filtering SNPs (streaming pass 1/2)", verbose)
+    for chunk in first_stream:
+        try:
+            filter_snp = chunk.snpfile.copy()
+            filter_snp["_stream_row"] = np.arange(len(filter_snp))
+            filtered = discard_from_aftable(
+                AfData(chunk.afs, chunk.counts, filter_snp),
+                maxmiss=maxmiss,
+                minmaf=minmaf,
+                maxmaf=maxmaf,
+                minac2=minac2,
+                outpop=outpop,
+                transitions=transitions,
+                transversions=transversions,
+                auto_only=auto_only,
+                keepsnps=keepsnps,
+                poly_only=False,
+            )
+            keep = np.zeros(len(chunk.snpfile), dtype=bool)
+            keep[filtered.snpfile["_stream_row"].to_numpy(int)] = True
+            retained_snp_parts.append(chunk.snpfile.loc[keep].reset_index(drop=True))
+        except ValueError as err:
+            if str(err) != "No SNPs remain after filtering":
+                raise
+            keep = np.zeros(len(chunk.snpfile), dtype=bool)
+        keep_chunks.append(keep)
+    if not retained_snp_parts:
+        raise ValueError("No SNPs remain after filtering")
+
+    retained_snp = pd.concat(retained_snp_parts, ignore_index=True)
+    block_lengths = get_block_lengths(retained_snp, blgsize)
+    nstats = len(popcombs)
+    nblocks = len(block_lengths)
+    numerator = np.full((nstats, nblocks), np.nan, dtype=float)
+    denominator = np.full_like(numerator, np.nan) if not outgroupmode else None
+    snp_counts = np.zeros((nstats, nblocks), dtype=float)
+
+    _log("Computing direct f3 (streaming pass 2/2)", verbose)
+    second_stream = iter_geno_to_afs(
+        pref,
+        pops=pops,
+        format=format,
+        adjust_pseudohaploid=adjust_pseudohaploid,
+        chunk_size=chunk_size,
+        verbose=verbose,
+    )
+    block_i = 0
+    block_remaining = int(block_lengths[0]) if nblocks else 0
+    block_parts: list[AfData] = []
+
+    def finish_block(parts: list[AfData], index: int) -> None:
+        block_afdat = _concat_afdata(parts)
+        snpwt = None
+        if outpop is not None and outpop_scale:
+            outgroup_af = block_afdat.afs[outpop].to_numpy(float)
+            snpwt = 1 / (outgroup_af * (1 - outgroup_af))
+        block_stats = _f3_direct_blocks_from_afs(
+            block_afdat,
+            popcombs,
+            blgsize=float("inf"),
+            allsnps=allsnps,
+            poly_only=poly_only,
+            snpwt=snpwt,
+            apply_corr=apply_corr,
+            outgroupmode=outgroupmode,
+            verbose=False,
+        )
+        snp_counts[:, index] = block_stats.snp_counts[:, 0]
+        if outgroupmode:
+            numerator[:, index] = block_stats.blocks[:, 0]
+        else:
+            numerator[:, index] = block_stats.ratio_num[:, 0]
+            denominator[:, index] = block_stats.ratio_den[:, 0]
+
+    for chunk_i, chunk in enumerate(second_stream):
+        keep = keep_chunks[chunk_i]
+        if not np.any(keep):
+            continue
+        kept = AfData(
+            chunk.afs.iloc[keep].copy(),
+            chunk.counts.iloc[keep].copy(),
+            chunk.snpfile.loc[keep].reset_index(drop=True),
+        )
+        kept.afs.index = kept.snpfile["SNP"]
+        kept.counts.index = kept.snpfile["SNP"]
+        offset = 0
+        while offset < len(kept.snpfile):
+            take = min(block_remaining, len(kept.snpfile) - offset)
+            stop = offset + take
+            part_snp = kept.snpfile.iloc[offset:stop].reset_index(drop=True)
+            part_afs = kept.afs.iloc[offset:stop].copy()
+            part_counts = kept.counts.iloc[offset:stop].copy()
+            part_afs.index = part_snp["SNP"]
+            part_counts.index = part_snp["SNP"]
+            block_parts.append(AfData(part_afs, part_counts, part_snp))
+            block_remaining -= take
+            offset = stop
+            if block_remaining == 0:
+                finish_block(block_parts, block_i)
+                block_i += 1
+                block_parts = []
+                if block_i < nblocks:
+                    block_remaining = int(block_lengths[block_i])
+    if block_parts or block_i != nblocks:
+        raise RuntimeError("Streaming f3 block assembly did not consume the retained SNP layout")
+
+    effective_lengths = np.nanmax(snp_counts, axis=0)
+    effective_lengths = np.where(effective_lengths > 0, effective_lengths, block_lengths).astype(float)
+    if outgroupmode:
+        jacks = [_count_jackknife(numerator[i], snp_counts[i]) for i in range(nstats)]
+        est = np.asarray([jack.total for jack in jacks], float)
+        loo = np.asarray([jack.loo for jack in jacks], float)
+        influence = np.asarray([jack.influence for jack in jacks], float)
+        contributes = np.asarray([jack.contributes for jack in jacks], bool)
+        cov = _influence_covariance(influence, contributes)
+        blocks = numerator
+    else:
+        blocks = np.full_like(numerator, np.nan)
+        np.divide(numerator, denominator, out=blocks, where=denominator != 0)
+        est, loo, _, cov = _ratio_block_jackknife(numerator, denominator, snp_counts)
+
+    stats = BlockStats(
+        rows=popcombs[cols].reset_index(drop=True),
+        blocks=blocks,
+        block_lengths=effective_lengths,
+        stat="f3",
+        loo=loo,
+        est=est,
+        cov=cov,
+    )
+    stats.snp_counts = snp_counts
+    stats.nominal_block_lengths = np.asarray(block_lengths, float)
+    if not outgroupmode:
+        stats.ratio_num = numerator
+        stats.ratio_den = denominator
     return stats
 
 
@@ -1663,22 +2187,52 @@ def f3_stats_from_geno(
     allsnps: bool = True,
     poly_only: bool = False,
     apply_corr: bool = True,
+    outgroupmode: bool = False,
     format: str | None = None,
     adjust_pseudohaploid=True,
     chunk_size: int = 10_000,
     tgeno_chunked: bool = False,
     verbose: bool = True,
+    stream: bool = True,
 ) -> BlockStats:
     """Compute corrected f3 blocks directly from genotype data.
 
     For f3(A; B, C), finite-sample correction is required only for
     populations repeated across the two contrasts. With distinct A, B, and C,
-    this is A, so a singleton B or C remains estimable.
+    this is A, so a singleton B or C remains estimable. Unless
+    ``outgroupmode=True``, the corrected numerator is normalized by unbiased
+    target heterozygosity, matching direct-genotype ADMIXTOOLS 2 behavior.
     """
     cols = ["pop1", "pop2", "pop3"]
     missing_cols = [col for col in cols if col not in popcombs.columns]
     if missing_cols:
         raise ValueError(f"f3 combinations are missing columns: {missing_cols}")
+    if maxmiss is None:
+        maxmiss = 1 if allsnps else 0
+    if stream:
+        return _f3_stats_from_geno_stream(
+            pref,
+            popcombs,
+            blgsize=blgsize,
+            maxmiss=maxmiss,
+            minmaf=minmaf,
+            maxmaf=maxmaf,
+            minac2=minac2,
+            outpop=outpop,
+            outpop_scale=outpop_scale,
+            transitions=transitions,
+            transversions=transversions,
+            auto_only=auto_only,
+            keepsnps=keepsnps,
+            allsnps=allsnps,
+            poly_only=poly_only,
+            apply_corr=apply_corr,
+            outgroupmode=outgroupmode,
+            format=format,
+            adjust_pseudohaploid=adjust_pseudohaploid,
+            chunk_size=chunk_size,
+            verbose=verbose,
+        )
     pops = list(dict.fromkeys(popcombs[cols].to_numpy().reshape(-1)))
     if outpop is not None and outpop not in pops:
         pops.append(outpop)
@@ -1692,8 +2246,6 @@ def f3_stats_from_geno(
         tgeno_chunked=tgeno_chunked,
     )
     _log("Filtering SNPs", verbose)
-    if maxmiss is None:
-        maxmiss = 1 if allsnps else 0
     afdat = discard_from_aftable(
         afdat,
         maxmiss=maxmiss,
@@ -1719,6 +2271,7 @@ def f3_stats_from_geno(
         poly_only=poly_only,
         snpwt=snpwt,
         apply_corr=apply_corr,
+        outgroupmode=outgroupmode,
         verbose=verbose,
     )
 
