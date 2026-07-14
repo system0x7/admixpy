@@ -106,9 +106,10 @@ population repeated across the two factors of `f3(A; B, C)`. Thus the target
 | Use only polymorphic sites | Direct f-statistics | `poly_only=True` (drops non-polymorphic sites) |
 
 Direct f3 and f4 genotype calculations stream by physical SNP block by default.
-They make two sequential passes over the genotype file so filtering and block
-boundaries remain identical while memory stays bounded. Set `stream=False` to
-use the materialized SNP-by-population path.
+They make two sequential passes over the genotype file for memory efficiency. Set `stream=False` to
+read the genotype file once and hold the complete SNP-by-population
+allele-frequency and count tables in memory. This is faster for datasets
+that fit in RAM.
 
 Lower-level helpers are also exported for direct use, including allele-frequency
 conversion (`anygeno_to_afs`, `eigenstrat_to_afs`, `plink_to_afs`,
