@@ -103,7 +103,7 @@ population repeated across the two factors of `f3(A; B, C)`. Thus the target
 | In-memory blocks without SNP counts | Precomputed-block workflows | `resampling="nominal_blocks"`; incomplete on-disk caches must be rebuilt |
 | Maximum available SNPs per combination | Direct f3/f4, qpWave, and qpAdm | `allsnps=True` (direct-genotype default) |
 | Common SNP set across a model | Direct f3/f4, qpWave, and qpAdm | `allsnps=False` |
-| Only segregating sites | Direct f-statistics | `poly_only=True`; equal non-boundary frequencies are retained |
+| Use only polymorphic sites | Direct f-statistics | `poly_only=True` (drops non-polymorphic sites) |
 
 Direct f3 and f4 genotype calculations stream by physical SNP block by default.
 They make two sequential passes over the genotype file so filtering and block
