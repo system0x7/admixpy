@@ -438,6 +438,7 @@ class RawF4Tests(unittest.TestCase):
                 pref, "A", "B", "C", "D", blgsize=0.04, stream=False,
                 adjust_pseudohaploid=False, verbose=False,
             )
+        self.assertEqual(streamed.loc[0, "n"], 12)
         pd.testing.assert_frame_equal(streamed, materialized)
 
 

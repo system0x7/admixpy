@@ -2402,7 +2402,11 @@ def qpdstat(
         verbose=verbose,
         **kwargs,
     )
-    return stats.to_frame()
+    out = stats.to_frame()
+    snp_counts = getattr(stats, "snp_counts", None)
+    if snp_counts is not None:
+        out["n"] = np.sum(snp_counts, axis=1).astype(int)
+    return FStatsFrame(out)
 
 
 def f4(
