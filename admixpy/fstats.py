@@ -358,23 +358,89 @@ def _outer_pair(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return a.T[:, None, :] * b.T[None, :, :]
 
 
-def _has_singleton_observations(afs: np.ndarray, counts: np.ndarray) -> bool:
-    return bool(np.any(np.isfinite(afs) & np.isfinite(counts) & (counts < 2)))
+def _singleton_observation_rows(*pairs: tuple[np.ndarray, np.ndarray]) -> np.ndarray:
+    affected = None
+    for afs, counts in pairs:
+        values = np.isfinite(afs) & np.isfinite(counts) & (counts < 2)
+        rows = values if values.ndim == 1 else np.any(values, axis=tuple(range(1, values.ndim)))
+        affected = rows.copy() if affected is None else affected | rows
+    return np.asarray([], dtype=bool) if affected is None else affected
 
 
-def _warn_singleton_observations(stat: str, apply_corr: bool, *pairs: tuple[np.ndarray, np.ndarray]) -> None:
-    if not any(_has_singleton_observations(afs, counts) for afs, counts in pairs):
-        return
+def _count_affected_blocks(affected_rows: np.ndarray, block_lengths: Sequence[int]) -> int:
+    affected_rows = np.asarray(affected_rows, bool)
+    start = 0
+    affected_blocks = 0
+    for n in block_lengths:
+        stop = start + int(n)
+        affected_blocks += int(np.any(affected_rows[start:stop]))
+        start = stop
+    if start != len(affected_rows):
+        raise ValueError("Block lengths must sum to the number of SNP rows")
+    return affected_blocks
+
+
+def _singleton_warning_message(
+    stat: str,
+    apply_corr: bool,
+    affected_blocks: int,
+    total_blocks: int,
+) -> str:
+    impact = "in 1 block" if total_blocks == 1 else f"in {affected_blocks} of {total_blocks} blocks"
     if apply_corr:
-        message = (
+        return (
             f"{stat} bias correction requires at least two independent allele observations; "
-            "excluding affected SNP values with count < 2"
+            f"excluding affected SNP values with count < 2 {impact}"
         )
-    else:
-        message = (
-            f"{stat} includes affected SNP values with count < 2 because apply_corr=False; "
-            "those values cannot be estimated without sampling bias"
+    return (
+        f"{stat} includes affected SNP values with count < 2 because apply_corr=False; "
+        f"those values cannot be estimated without sampling bias; affected values occurred {impact}"
+    )
+
+
+@dataclass
+class _SingletonWarningSummary:
+    stat: str
+    apply_corr: bool
+    affected_blocks: int = 0
+
+    def observe(
+        self,
+        block_lengths: Sequence[int],
+        *pairs: tuple[np.ndarray, np.ndarray],
+    ) -> None:
+        affected_rows = _singleton_observation_rows(*pairs)
+        self.affected_blocks += _count_affected_blocks(affected_rows, block_lengths)
+
+    def warn(self, total_blocks: int, *, stacklevel: int) -> None:
+        if not self.affected_blocks:
+            return
+        warnings.warn(
+            _singleton_warning_message(
+                self.stat,
+                self.apply_corr,
+                self.affected_blocks,
+                total_blocks,
+            ),
+            RuntimeWarning,
+            stacklevel=stacklevel,
         )
+
+
+def _warn_singleton_observations(
+    stat: str,
+    apply_corr: bool,
+    *pairs: tuple[np.ndarray, np.ndarray],
+    block_lengths: Sequence[int] | None = None,
+) -> None:
+    affected_rows = _singleton_observation_rows(*pairs)
+    if not np.any(affected_rows):
+        return
+    if block_lengths is None:
+        block_lengths = [len(affected_rows)]
+    total_blocks = len(block_lengths)
+    affected_blocks = _count_affected_blocks(affected_rows, block_lengths)
+    message = _singleton_warning_message(stat, apply_corr, affected_blocks, total_blocks)
     warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 
@@ -400,7 +466,13 @@ def mats_to_f2arr(
     c1, c2 = np.asarray(countmat1, float), np.asarray(countmat2, float)
     out = np.empty((a1.shape[1], a2.shape[1], len(block_lengths)), dtype=float)
     snpwt = None if snpwt is None else np.asarray(snpwt, float)
-    _warn_singleton_observations("f2", apply_corr, (a1, c1), (a2, c2))
+    _warn_singleton_observations(
+        "f2",
+        apply_corr,
+        (a1, c1),
+        (a2, c2),
+        block_lengths=block_lengths,
+    )
     start = 0
     for b, n in enumerate(block_lengths):
         stop = start + int(n)
@@ -468,7 +540,13 @@ def _hudson_fst_components(
     num_sums = np.full_like(out, np.nan)
     den_sums = np.full_like(out, np.nan)
     snpwt = None if snpwt is None else np.asarray(snpwt, float)
-    _warn_singleton_observations("FST", apply_corr, (a1, c1), (a2, c2))
+    _warn_singleton_observations(
+        "FST",
+        apply_corr,
+        (a1, c1),
+        (a2, c2),
+        block_lengths=block_lengths,
+    )
     start = 0
     for b, n in enumerate(block_lengths):
         stop = start + int(n)
@@ -1570,6 +1648,7 @@ def _f4_direct_blocks_from_afs(
     stat_name: str = "f4",
     normalize_by_target_het: bool = False,
     verbose: bool = True,
+    singleton_warning: _SingletonWarningSummary | None = None,
 ) -> BlockStats:
     cols = ["pop1", "pop2", "pop3", "pop4"]
     combos = combos.reset_index(drop=True).copy()
@@ -1599,13 +1678,18 @@ def _f4_direct_blocks_from_afs(
         for pop in set(first) | set(second):
             correction_coefficients[stat_i, pop_i[pop]] = first.get(pop, 0.0) * second.get(pop, 0.0)
     correction_pops = np.flatnonzero(np.any(correction_coefficients != 0, axis=0))
-    if correction_pops.size:
-        _warn_singleton_observations(
-            stat_name,
-            apply_corr,
-            (arr[:, correction_pops], count_arr[:, correction_pops]),
-        )
     block_lengths = get_block_lengths(afdat.snpfile, blgsize)
+    if correction_pops.size:
+        pairs = ((arr[:, correction_pops], count_arr[:, correction_pops]),)
+        if singleton_warning is None:
+            _warn_singleton_observations(
+                stat_name,
+                apply_corr,
+                *pairs,
+                block_lengths=block_lengths,
+            )
+        else:
+            singleton_warning.observe(block_lengths, *pairs)
     nstats = len(combos)
     out = np.full((nstats, len(block_lengths)), np.nan, dtype=float)
     denominator = np.full_like(out, np.nan) if normalize_by_target_het else None
@@ -1726,10 +1810,10 @@ def f4_stats_from_geno(
     apply_corr: bool = True,
     format: str | None = None,
     adjust_pseudohaploid=True,
-    chunk_size: int = 10_000,
+    chunk_size: int = 250_000,
     tgeno_chunked: bool = False,
     verbose: bool = True,
-    stream: bool = True,
+    stream: bool = False,
 ) -> BlockStats:
     cols = ["pop1", "pop2", "pop3", "pop4"]
     pops = list(dict.fromkeys(popcombs[cols].to_numpy().reshape(-1)))
@@ -1801,6 +1885,7 @@ def _f3_direct_blocks_from_afs(
     apply_corr: bool = True,
     outgroupmode: bool = False,
     verbose: bool = True,
+    singleton_warning: _SingletonWarningSummary | None = None,
 ) -> BlockStats:
     cols = ["pop1", "pop2", "pop3"]
     missing_cols = [col for col in cols if col not in combos.columns]
@@ -1828,6 +1913,7 @@ def _f3_direct_blocks_from_afs(
         stat_name="f3",
         normalize_by_target_het=not outgroupmode,
         verbose=verbose,
+        singleton_warning=singleton_warning,
     )
     stats.rows = combos[cols].copy()
     stats.stat = "f3"
@@ -1928,6 +2014,7 @@ def _f4_stats_from_geno_stream(
     block_i = 0
     block_remaining = int(block_lengths[0]) if nblocks else 0
     block_parts: list[AfData] = []
+    singleton_warning = _SingletonWarningSummary("f4", apply_corr)
 
     def finish_block(parts: list[AfData], index: int) -> None:
         block_stats = _f4_direct_blocks_from_afs(
@@ -1938,6 +2025,7 @@ def _f4_stats_from_geno_stream(
             poly_only=poly_only,
             apply_corr=apply_corr,
             verbose=False,
+            singleton_warning=singleton_warning,
         )
         block_estimates[:, index] = block_stats.blocks[:, 0]
         snp_counts[:, index] = block_stats.snp_counts[:, 0]
@@ -1971,6 +2059,7 @@ def _f4_stats_from_geno_stream(
                     block_remaining = int(block_lengths[block_i])
     if block_parts or block_i != nblocks:
         raise RuntimeError("Streaming f4 block assembly did not consume the retained SNP layout")
+    singleton_warning.warn(nblocks, stacklevel=3)
 
     effective_lengths = np.nanmax(snp_counts, axis=0)
     effective_lengths = np.where(effective_lengths > 0, effective_lengths, block_lengths).astype(float)
@@ -2081,6 +2170,7 @@ def _f3_stats_from_geno_stream(
     block_i = 0
     block_remaining = int(block_lengths[0]) if nblocks else 0
     block_parts: list[AfData] = []
+    singleton_warning = _SingletonWarningSummary("f3", apply_corr)
 
     def finish_block(parts: list[AfData], index: int) -> None:
         block_afdat = _concat_afdata(parts)
@@ -2098,6 +2188,7 @@ def _f3_stats_from_geno_stream(
             apply_corr=apply_corr,
             outgroupmode=outgroupmode,
             verbose=False,
+            singleton_warning=singleton_warning,
         )
         snp_counts[:, index] = block_stats.snp_counts[:, 0]
         if outgroupmode:
@@ -2137,6 +2228,7 @@ def _f3_stats_from_geno_stream(
                     block_remaining = int(block_lengths[block_i])
     if block_parts or block_i != nblocks:
         raise RuntimeError("Streaming f3 block assembly did not consume the retained SNP layout")
+    singleton_warning.warn(nblocks, stacklevel=3)
 
     effective_lengths = np.nanmax(snp_counts, axis=0)
     effective_lengths = np.where(effective_lengths > 0, effective_lengths, block_lengths).astype(float)
@@ -2190,10 +2282,10 @@ def f3_stats_from_geno(
     outgroupmode: bool = False,
     format: str | None = None,
     adjust_pseudohaploid=True,
-    chunk_size: int = 10_000,
+    chunk_size: int = 250_000,
     tgeno_chunked: bool = False,
     verbose: bool = True,
-    stream: bool = True,
+    stream: bool = False,
 ) -> BlockStats:
     """Compute corrected f3 blocks directly from genotype data.
 

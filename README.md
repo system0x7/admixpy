@@ -101,11 +101,11 @@ outgroup mode after removing the latter's factor of 1000.
 | Use only polymorphic sites | Direct f-statistics | `poly_only=True` (drops non-polymorphic sites) |
 
 Direct f3 and f4 genotype calculations (including the f4 calculations
-for qpAdm and qpWave), stream by physical SNP block by default. They make
-two sequential passes over the genotype file for memory efficiency. Set
-`stream=False` to read the genotype file once and hold the complete
-SNP-by-population allele-frequency and count tables in memory. This is faster
-for datasets that fit in RAM.
+for qpAdm and qpWave) read the genotype file once by default and hold the
+complete SNP-by-population allele-frequency and count tables in memory. For
+datasets that do not fit comfortably in RAM, set `stream=True` to use two
+bounded-memory passes with 250,000 SNPs per chunk by default. The chunk size
+can be adjusted with `chunk_size`.
 
 Lower-level helpers are also exported for direct use, including allele-frequency
 conversion (`anygeno_to_afs`, `eigenstrat_to_afs`, `plink_to_afs`,

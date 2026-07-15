@@ -65,7 +65,8 @@ def _packed_record_len(n: int) -> int:
 
 
 def _parse_geno_header_with_kind(path: str | Path) -> tuple[str, int, int] | None:
-    head = Path(path).read_bytes()[:48]
+    with Path(path).open("rb") as fh:
+        head = fh.read(48)
     try:
         text = head.decode("ascii", errors="strict")
     except UnicodeDecodeError:
@@ -679,7 +680,7 @@ def iter_geno_to_afs(
     pops=None,
     format: str | None = None,
     adjust_pseudohaploid=True,
-    chunk_size: int = 10_000,
+    chunk_size: int = 250_000,
     verbose: bool = True,
 ) -> Iterator[AfData]:
     """Yield population allele frequencies in bounded SNP chunks.
@@ -748,9 +749,10 @@ def iter_geno_to_afs(
         ploidy = np.full(len(indvec_sub), 2.0)
 
     nchunks = math.ceil(nsnp / chunk_size) if nsnp else 0
+    chunk_label = "TGENO" if format == "tgeno" else format
     for chunk_i, start in enumerate(range(1, nsnp + 1, chunk_size), start=1):
         stop = min(start + chunk_size - 1, nsnp)
-        _log_chunk(format, chunk_i, nchunks, start, stop, verbose)
+        _log_chunk(chunk_label, chunk_i, nchunks, start, stop, verbose)
         geno = read_range(start, stop, keep_inds)
         afs, counts = _geno_to_af_arrays(geno, indvec_sub, popnames, ploidy)
         chunk_snp = snp.iloc[start - 1:stop].reset_index(drop=True)

@@ -1,8 +1,9 @@
+import inspect
 import tempfile
 import unittest
 import warnings
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import mock_open, patch
 
 import numpy as np
 import pandas as pd
@@ -17,7 +18,9 @@ from admixpy.fstats import (
     afs_to_f2_blocks,
     f2,
     f2_from_geno,
+    f3_stats_from_geno,
     fst,
+    f4_stats_from_geno,
     _f3_direct_blocks_from_afs,
     jackknife_cov,
     mats_to_f2arr,
@@ -28,7 +31,23 @@ from admixpy.fstats import (
     stats_to_loo,
     write_f2,
 )
-from admixpy.genotypes import AfData
+from admixpy.genotypes import AfData, _parse_geno_header_with_kind, iter_geno_to_afs
+
+
+class DirectGenotypeDefaultsTests(unittest.TestCase):
+    def test_binary_header_parser_reads_only_48_bytes(self):
+        opened = mock_open(read_data=b"TGENO 2 4 abc def".ljust(48, b"\0"))
+        with patch.object(Path, "open", opened):
+            self.assertEqual(_parse_geno_header_with_kind("large.tgeno"), ("TGENO", 2, 4))
+        opened.return_value.read.assert_called_once_with(48)
+
+    def test_materialized_mode_is_default(self):
+        self.assertFalse(inspect.signature(f3_stats_from_geno).parameters["stream"].default)
+        self.assertFalse(inspect.signature(f4_stats_from_geno).parameters["stream"].default)
+
+    def test_streaming_chunk_default_is_250000(self):
+        for func in (f3_stats_from_geno, f4_stats_from_geno, iter_geno_to_afs):
+            self.assertEqual(inspect.signature(func).parameters["chunk_size"].default, 250_000)
 
 
 class HudsonFstTests(unittest.TestCase):
@@ -437,7 +456,7 @@ class RawF4Tests(unittest.TestCase):
             pref = self._write_complete_eigenstrat(Path(tmp))
             streamed = qpdstat(
                 pref, "A", "B", "C", "D", blgsize=0.04, chunk_size=3,
-                adjust_pseudohaploid=False, verbose=False,
+                adjust_pseudohaploid=False, stream=True, verbose=False,
             )
             materialized = qpdstat(
                 pref, "A", "B", "C", "D", blgsize=0.04, stream=False,
@@ -635,11 +654,38 @@ class DirectF3Tests(unittest.TestCase):
     def test_singleton_target_remains_unestimable_when_correcting(self):
         with tempfile.TemporaryDirectory() as tmp:
             pref = self._write_singleton_source_eigenstrat(Path(tmp))
-            with self.assertWarnsRegex(RuntimeWarning, "at least two"):
-                out = qp3pop(pref, "C", "A", "B", blgsize=0.05, verbose=False)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                out = qp3pop(
+                    pref, "C", "A", "B", blgsize=0.05, stream=True, verbose=False
+                )
+        self.assertEqual(len(caught), 1)
+        self.assertIs(caught[0].category, RuntimeWarning)
+        self.assertIn("f3 bias correction requires at least two", str(caught[0].message))
+        self.assertIn("count < 2 in 2 of 3 blocks", str(caught[0].message))
         self.assertTrue(np.isnan(out.loc[0, "est"]))
         self.assertTrue(np.isnan(out.loc[0, "se"]))
         self.assertEqual(out.loc[0, "n"], 0)
+
+    def test_streaming_f4_singleton_warning_is_summarized_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_singleton_source_eigenstrat(Path(tmp))
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                qpdstat(
+                    pref,
+                    "C",
+                    "A",
+                    "C",
+                    "B",
+                    blgsize=0.05,
+                    stream=True,
+                    verbose=False,
+                )
+        self.assertEqual(len(caught), 1)
+        self.assertIs(caught[0].category, RuntimeWarning)
+        self.assertIn("f4 bias correction requires at least two", str(caught[0].message))
+        self.assertIn("count < 2 in 2 of 3 blocks", str(caught[0].message))
 
     def test_complete_direct_f3_matches_f2_derived_f3(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -759,7 +805,7 @@ class DirectF3Tests(unittest.TestCase):
             pref = RawF4Tests._write_complete_eigenstrat(Path(tmp))
             streamed = qp3pop(
                 pref, "A", "B", "C", blgsize=0.04, chunk_size=3,
-                adjust_pseudohaploid=False, verbose=False,
+                adjust_pseudohaploid=False, stream=True, verbose=False,
             )
             materialized = qp3pop(
                 pref, "A", "B", "C", blgsize=0.04, stream=False,
@@ -775,7 +821,7 @@ class DirectF3Tests(unittest.TestCase):
             results = [
                 qp3pop(
                     pref, "A", "B", "C", blgsize=0.04, chunk_size=3,
-                    adjust_pseudohaploid=False, verbose=False,
+                    adjust_pseudohaploid=False, stream=True, verbose=False,
                 )
                 for pref in prefixes
             ]
