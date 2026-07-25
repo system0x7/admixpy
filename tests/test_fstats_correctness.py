@@ -11,6 +11,7 @@ import pandas as pd
 from admixpy.fstats import (
     BlockStats,
     F2Blocks,
+    F4BlockCache,
     QpWaveStats,
     _qinv_from_cov,
     _hudson_fst,
@@ -20,13 +21,16 @@ from admixpy.fstats import (
     f2_from_geno,
     f3_stats_from_geno,
     fst,
+    f4_stats,
     f4_stats_from_geno,
+    f4_model_cache,
     _f3_direct_blocks_from_afs,
     jackknife_cov,
     mats_to_f2arr,
     qp3pop,
     qpadm,
     qpdstat,
+    qpwave_f4stats,
     read_f2,
     stats_to_loo,
     write_f2,
@@ -408,6 +412,202 @@ class RawF4Tests(unittest.TestCase):
         self.assertAlmostEqual(raw.loc[0, "se"], cached.loc[0, "se"])
         self.assertAlmostEqual(cached.loc[0, "est"], round_trip.loc[0, "est"])
         self.assertAlmostEqual(cached.loc[0, "se"], round_trip.loc[0, "se"])
+
+    def test_direct_f4_diagonal_variance_matches_full_covariance(self):
+        combos = pd.DataFrame(
+            [
+                {"pop1": "A", "pop2": "B", "pop3": "C", "pop4": "D"},
+                {"pop1": "A", "pop2": "C", "pop3": "B", "pop4": "D"},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_complete_eigenstrat(Path(tmp))
+            full = qpdstat(
+                pref,
+                combos,
+                unique_only=False,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            diagonal = qpdstat(
+                pref,
+                combos,
+                unique_only=False,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                covariance=False,
+                verbose=False,
+            )
+            stats = f4_stats_from_geno(
+                pref,
+                combos,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                covariance=False,
+                verbose=False,
+            )
+        pd.testing.assert_frame_equal(diagonal, full)
+        self.assertIsNone(stats.cov)
+        self.assertTrue(np.isfinite(stats.variances).all())
+        np.testing.assert_allclose(stats.se, full["se"])
+
+    def test_f2_backed_f4_diagonal_variance_matches_full_covariance(self):
+        combos = pd.DataFrame(
+            [
+                {"pop1": "A", "pop2": "B", "pop3": "C", "pop4": "D"},
+                {"pop1": "A", "pop2": "C", "pop3": "B", "pop4": "D"},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_complete_eigenstrat(Path(tmp))
+            full = qpdstat(
+                pref,
+                combos,
+                unique_only=False,
+                allsnps=False,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            diagonal = qpdstat(
+                pref,
+                combos,
+                unique_only=False,
+                allsnps=False,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                covariance=False,
+                verbose=False,
+            )
+            stats = f4_stats(
+                pref,
+                combos,
+                unique_only=False,
+                allsnps=False,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                covariance=False,
+                verbose=False,
+            )
+        pd.testing.assert_frame_equal(diagonal, full)
+        self.assertIsNone(stats.cov)
+        self.assertTrue(np.isfinite(stats.variances).all())
+        self.assertTrue(np.isfinite(stats.influence).all())
+        np.testing.assert_allclose(stats.se, full["se"])
+
+    def test_nominal_block_f4_diagonal_variance_matches_full_covariance(self):
+        combos = pd.DataFrame(
+            [
+                {"pop1": "A", "pop2": "B", "pop3": "C", "pop4": "D"},
+                {"pop1": "A", "pop2": "C", "pop3": "B", "pop4": "D"},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_complete_eigenstrat(Path(tmp))
+            full = f4_stats(
+                pref,
+                combos,
+                unique_only=False,
+                allsnps=False,
+                resampling="nominal_blocks",
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            diagonal = f4_stats(
+                pref,
+                combos,
+                unique_only=False,
+                allsnps=False,
+                resampling="nominal_blocks",
+                covariance=False,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+        self.assertIsNone(diagonal.cov)
+        self.assertTrue(np.isfinite(diagonal.variances).all())
+        np.testing.assert_allclose(diagonal.est, full.est)
+        np.testing.assert_allclose(diagonal.se, full.se)
+
+    def test_f4_block_cache_preserves_diagonal_variances(self):
+        combos = pd.DataFrame(
+            [
+                {"pop1": "A", "pop2": "B", "pop3": "C", "pop4": "D"},
+                {"pop1": "A", "pop2": "C", "pop3": "B", "pop4": "D"},
+            ]
+        )
+        cached_stats = BlockStats(
+            rows=combos,
+            blocks=np.zeros((2, 3)),
+            block_lengths=np.ones(3),
+            stat="f4",
+            est=np.array([0.1, 0.2]),
+            cov=np.array([[4.0, 1.0], [1.0, 9.0]]),
+        )
+        requested = combos.iloc[::-1].reset_index(drop=True)
+        from_covariance = f4_stats(
+            F4BlockCache(cached_stats),
+            requested,
+            unique_only=False,
+            covariance=False,
+            verbose=False,
+        )
+        self.assertIsNone(from_covariance.cov)
+        np.testing.assert_allclose(from_covariance.variances, [9.0, 4.0])
+        np.testing.assert_allclose(from_covariance.se, [3.0, 2.0])
+
+        cached_stats.cov = None
+        cached_stats.variances = np.array([16.0, 25.0])
+        from_variances = f4_stats(
+            F4BlockCache(cached_stats),
+            requested,
+            unique_only=False,
+            covariance=False,
+            verbose=False,
+        )
+        self.assertIsNone(from_variances.cov)
+        np.testing.assert_allclose(from_variances.variances, [25.0, 16.0])
+        np.testing.assert_allclose(from_variances.se, [5.0, 4.0])
+
+    def test_covariance_dependent_workflows_reject_diagonal_only_mode(self):
+        combos = pd.DataFrame(
+            [
+                {"pop1": "A", "pop2": "B", "pop3": "C", "pop4": "D"},
+            ]
+        )
+        diagonal_stats = BlockStats(
+            rows=combos,
+            blocks=np.zeros((1, 3)),
+            block_lengths=np.ones(3),
+            stat="f4",
+            est=np.array([0.1]),
+            variances=np.array([4.0]),
+        )
+        with self.assertRaisesRegex(ValueError, "does not contain a full covariance"):
+            f4_stats(
+                F4BlockCache(diagonal_stats),
+                combos,
+                unique_only=False,
+                covariance=True,
+                verbose=False,
+            )
+        with self.assertRaisesRegex(ValueError, "qpWave and qpAdm require covariance=True"):
+            qpwave_f4stats(
+                None,
+                left=["A", "B"],
+                right=["C", "D"],
+                covariance=False,
+                verbose=False,
+            )
+        with self.assertRaisesRegex(ValueError, "f4_model_cache requires covariance=True"):
+            f4_model_cache(
+                None,
+                pd.DataFrame([{"left": ["A", "B"], "right": ["C", "D"]}]),
+                covariance=False,
+                verbose=False,
+            )
 
     def test_raw_and_cached_pairwise_f4_are_finite_with_an_absent_block(self):
         with tempfile.TemporaryDirectory() as tmp:

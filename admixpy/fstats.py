@@ -172,11 +172,14 @@ class BlockStats:
     loo: np.ndarray | None = None
     est: np.ndarray | None = None
     cov: np.ndarray | None = None
+    variances: np.ndarray | None = None
 
     @property
     def se(self) -> np.ndarray:
         if self.cov is None:
-            return np.full(len(self.rows), np.nan)
+            if self.variances is None:
+                return np.full(len(self.rows), np.nan)
+            return np.sqrt(np.asarray(self.variances, float))
         return np.sqrt(np.diag(self.cov))
 
     @property
@@ -818,6 +821,12 @@ def f4_model_cache(
     verbose: bool = True,
     **kwargs,
 ) -> F4ModelCache | F4BlockCache:
+    covariance = kwargs.pop("covariance", True)
+    if not covariance:
+        raise ValueError(
+            "f4_model_cache requires covariance=True because qpWave and qpAdm "
+            "require the full f4 covariance matrix"
+        )
     resampling = _validate_resampling(resampling)
     allsnps = bool(kwargs.pop("allsnps", False))
     if isinstance(data, F4ModelCache):
@@ -967,13 +976,18 @@ def get_f2(data, pops=None, pops2=None, **kwargs) -> F2Blocks:
 def est_to_loo(blocks: F2Blocks | np.ndarray, block_lengths: Sequence[int] | None = None):
     arr = blocks.data if isinstance(blocks, F2Blocks) else np.asarray(blocks, float)
     bl = blocks.block_lengths if isinstance(blocks, F2Blocks) else np.asarray(block_lengths, float)
+    finite = np.isfinite(arr)
+    weights = np.where(finite, bl[None, None, :], 0)
     numer = np.nansum(arr * bl[None, None, :], axis=2)
-    denom = np.nansum(np.where(np.isfinite(arr), bl[None, None, :], 0), axis=2)
+    denom = np.sum(weights, axis=2)
     tot = np.full(numer.shape, np.nan, dtype=float)
     np.divide(numer, denom, out=tot, where=denom != 0)
-    rel = bl / bl.sum()
+    rel = np.zeros_like(arr, dtype=float)
+    np.divide(weights, denom[:, :, None], out=rel, where=denom[:, :, None] != 0)
+    out = np.full_like(arr, np.nan, dtype=float)
+    present = finite & (rel < 1)
     with np.errstate(invalid="ignore", divide="ignore"):
-        out = (tot[:, :, None] - arr * rel[None, None, :]) / (1 - rel[None, None, :])
+        out[present] = ((tot[:, :, None] - arr * rel) / (1 - rel))[present]
     if isinstance(blocks, F2Blocks):
         return F2Blocks(out, blocks.pops1, blocks.pops2, blocks.block_lengths, blocks.stat)
     return out
@@ -1238,7 +1252,7 @@ def jackknife_cov(
                 & np.isfinite(loo[i])
                 & np.isfinite(loo[j])
             )
-            if np.any(keep):
+            if int(np.sum(keep)) >= 2:
                 h = bl[keep].sum() / bl[keep]
                 val = np.mean(
                     (est_vec[i] - loo[i, keep])
@@ -1251,6 +1265,12 @@ def jackknife_cov(
 
 def block_covariance(stats: BlockStats | np.ndarray, block_lengths: Sequence[int] | None = None) -> np.ndarray:
     if isinstance(stats, BlockStats):
+        influence = getattr(stats, "influence", None)
+        contributes = getattr(stats, "contributes", None)
+        if influence is not None and contributes is not None:
+            cov = _influence_covariance(influence, contributes)
+            stats.cov = cov
+            return cov
         loo = stats.loo
         contributes = None if stats.blocks is None else np.isfinite(stats.blocks)
         if loo is None:
@@ -1410,10 +1430,23 @@ def _influence_covariance(influence: np.ndarray, contributes: np.ndarray) -> np.
     return cov
 
 
+def _influence_variances(influence: np.ndarray, contributes: np.ndarray) -> np.ndarray:
+    # Return only covariance diagonal entries (for custom usage)
+    influence = np.asarray(influence, float)
+    contributes = np.asarray(contributes, bool)
+    variances = np.full(influence.shape[0], np.nan, dtype=float)
+    for i in range(influence.shape[0]):
+        keep = contributes[i] & np.isfinite(influence[i])
+        if int(np.sum(keep)) >= 2:
+            variances[i] = float(np.mean(influence[i, keep] ** 2))
+    return variances
+
+
 def _pairwise_composite_jackknife(
     blocks: F2Blocks,
     specs: Sequence[Sequence[tuple[float, str, str]]],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    covariance: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
     """Combine count-weighted pair estimates into linear f3/f4 statistics.
 
     Each physical block is deleted from every required population pair. Pair
@@ -1456,7 +1489,8 @@ def _pairwise_composite_jackknife(
             if coefficient != 0:
                 contributes[stat_i] |= jack.contributes
 
-    return totals, loo, influence, _influence_covariance(influence, contributes)
+    cov = _influence_covariance(influence, contributes) if covariance else None
+    return totals, loo, influence, cov, contributes
 
 
 def _all_block_pops(blocks: F2Blocks) -> list[str]:
@@ -1578,7 +1612,10 @@ def qp3pop(
             ]
             for row in combos.itertuples(index=False)
         ]
-        pairwise_est, _, _, pairwise_cov = _pairwise_composite_jackknife(blocks, specs)
+        pairwise_est, _, _, pairwise_cov, _ = _pairwise_composite_jackknife(
+            blocks,
+            specs,
+        )
     rows = []
     _log(f"Computing f3 for {len(combos)} population combinations", verbose)
     for stat_i, row in enumerate(combos.itertuples(index=False)):
@@ -1647,6 +1684,7 @@ def _f4_direct_blocks_from_afs(
     apply_corr: bool = True,
     stat_name: str = "f4",
     normalize_by_target_het: bool = False,
+    covariance: bool = True,
     verbose: bool = True,
     singleton_warning: _SingletonWarningSummary | None = None,
 ) -> BlockStats:
@@ -1781,10 +1819,15 @@ def _f4_direct_blocks_from_afs(
         loo = np.asarray([jack.loo for jack in jacks], float)
         influence = np.asarray([jack.influence for jack in jacks], float)
         contributes = np.asarray([jack.contributes for jack in jacks], bool)
-        cov = _influence_covariance(influence, contributes)
+        cov = _influence_covariance(influence, contributes) if covariance else None
         result_blocks = out
     rows = combos.drop(columns=["model"]) if set(combos["model"]) == {1} else combos
     stats = BlockStats(rows=rows.reset_index(drop=True), blocks=result_blocks, block_lengths=effective_lengths, stat=stat_name, loo=loo, est=est, cov=cov)
+    if not covariance and not normalize_by_target_het:
+        stats.variances = _influence_variances(influence, contributes)
+    if not normalize_by_target_het:
+        stats.influence = influence
+        stats.contributes = contributes
     stats.snp_counts = snp_counts
     stats.nominal_block_lengths = np.asarray(block_lengths, float)
     if normalize_by_target_het:
@@ -1814,6 +1857,7 @@ def f4_stats_from_geno(
     tgeno_chunked: bool = False,
     verbose: bool = True,
     stream: bool = False,
+    covariance: bool = True,
 ) -> BlockStats:
     cols = ["pop1", "pop2", "pop3", "pop4"]
     pops = list(dict.fromkeys(popcombs[cols].to_numpy().reshape(-1)))
@@ -1841,6 +1885,7 @@ def f4_stats_from_geno(
             adjust_pseudohaploid=adjust_pseudohaploid,
             chunk_size=chunk_size,
             verbose=verbose,
+            covariance=covariance,
         )
     afdat = anygeno_to_afs(
         pref,
@@ -1871,6 +1916,7 @@ def f4_stats_from_geno(
         allsnps=allsnps,
         poly_only=poly_only,
         apply_corr=apply_corr,
+        covariance=covariance,
         verbose=verbose,
     )
 
@@ -1951,6 +1997,7 @@ def _f4_stats_from_geno_stream(
     adjust_pseudohaploid,
     chunk_size: int,
     verbose: bool,
+    covariance: bool,
 ) -> BlockStats:
     """Two-pass, bounded-memory direct f4 computation."""
     cols = ["pop1", "pop2", "pop3", "pop4"]
@@ -2024,6 +2071,7 @@ def _f4_stats_from_geno_stream(
             allsnps=allsnps,
             poly_only=poly_only,
             apply_corr=apply_corr,
+            covariance=False,
             verbose=False,
             singleton_warning=singleton_warning,
         )
@@ -2068,9 +2116,13 @@ def _f4_stats_from_geno_stream(
     loo = np.asarray([jack.loo for jack in jacks], float)
     influence = np.asarray([jack.influence for jack in jacks], float)
     contributes = np.asarray([jack.contributes for jack in jacks], bool)
-    cov = _influence_covariance(influence, contributes)
+    cov = _influence_covariance(influence, contributes) if covariance else None
     rows = combos.drop(columns=["model"]) if "model" in combos and set(combos["model"]) == {1} else combos
     stats = BlockStats(rows.reset_index(drop=True), block_estimates, effective_lengths, "f4", loo, est, cov)
+    if not covariance:
+        stats.variances = _influence_variances(influence, contributes)
+    stats.influence = influence
+    stats.contributes = contributes
     stats.snp_counts = snp_counts
     stats.nominal_block_lengths = np.asarray(block_lengths, float)
     return stats
@@ -2397,6 +2449,11 @@ def f4_stats(
     if isinstance(data, F4BlockCache):
         key = ["pop1", "pop2", "pop3", "pop4"]
         cached = data.stats
+        if covariance and cached.cov is None:
+            raise ValueError(
+                "F4BlockCache does not contain a full covariance matrix; "
+                "rebuild the cache with covariance=True"
+            )
         left = combos.reset_index().rename(columns={"index": "_order"})
         cached_rows = cached.rows.reset_index().rename(columns={"index": "_cache_i"}).drop_duplicates(key)
         merged = left.merge(
@@ -2413,11 +2470,38 @@ def f4_stats(
         loo = cached.loo[take] if cached.loo is not None and keep_loo else None
         est = cached.est[take] if cached.est is not None else None
         cov = cached.cov[np.ix_(take, take)] if covariance and cached.cov is not None else None
-        return BlockStats(rows=combos, blocks=blocks, block_lengths=cached.block_lengths.copy(), stat="f4", loo=loo, est=est, cov=cov)
+        variances = (
+            np.asarray(cached.variances, float)[take]
+            if cached.variances is not None
+            else None
+        )
+        if not covariance and variances is None and cached.cov is not None:
+            variances = np.diag(cached.cov)[take]
+        stats = BlockStats(
+            rows=combos,
+            blocks=blocks,
+            block_lengths=cached.block_lengths.copy(),
+            stat="f4",
+            loo=loo,
+            est=est,
+            cov=cov,
+            variances=variances,
+        )
+        if hasattr(cached, "influence") and hasattr(cached, "contributes"):
+            stats.influence = np.asarray(cached.influence, float)[take]
+            stats.contributes = np.asarray(cached.contributes, bool)[take]
+        return stats
     if allsnps:
         if isinstance(data, (F2Blocks, F4ModelCache)) or (isinstance(data, (str, Path)) and Path(data).is_dir()):
             raise ValueError(_ALLSNPS_DIRECT_ERROR)
-        stats = f4_stats_from_geno(data, combos, allsnps=True, verbose=verbose, **kwargs)
+        stats = f4_stats_from_geno(
+            data,
+            combos,
+            allsnps=True,
+            verbose=verbose,
+            covariance=covariance,
+            **kwargs,
+        )
         if not keep_blocks:
             stats.blocks = None
         if not keep_loo:
@@ -2445,7 +2529,17 @@ def f4_stats(
             ],
             float,
         )
-        cov, est = jackknife_cov(stat_loo, blocks.block_lengths)
+        if covariance:
+            cov, est = jackknife_cov(stat_loo, blocks.block_lengths)
+            variances = None
+        else:
+            stat_results = [
+                jack_vec_stats(row, blocks.block_lengths)
+                for row in stat_loo
+            ]
+            est = np.asarray([result[0] for result in stat_results], float)
+            variances = np.asarray([result[1] for result in stat_results], float)
+            cov = None
     else:
         specs = [
             [
@@ -2456,8 +2550,12 @@ def f4_stats(
             ]
             for row in combos.itertuples(index=False)
         ]
-        est, stat_loo, _, cov = _pairwise_composite_jackknife(blocks, specs)
-    return BlockStats(
+        est, stat_loo, influence, cov, contributes = _pairwise_composite_jackknife(
+            blocks,
+            specs,
+            covariance=covariance,
+        )
+    stats = BlockStats(
         rows=combos,
         blocks=stat_blocks if keep_blocks else None,
         block_lengths=blocks.block_lengths.copy(),
@@ -2466,6 +2564,14 @@ def f4_stats(
         est=est,
         cov=cov if covariance else None,
     )
+    if resampling == "pairwise_counts":
+        stats.influence = influence
+        stats.contributes = contributes
+        if not covariance:
+            stats.variances = _influence_variances(influence, contributes)
+    elif not covariance:
+        stats.variances = variances
+    return stats
 
 
 def qpdstat(
@@ -2547,6 +2653,11 @@ def qpwave_f4stats(
     verbose: bool = True,
     **kwargs,
 ) -> QpWaveStats:
+    if not kwargs.get("covariance", True):
+        raise ValueError(
+            "qpWave and qpAdm require covariance=True; covariance=False is only "
+            "supported for standalone f4 statistics"
+        )
     if "allsnps" not in kwargs:
         kwargs["allsnps"] = _default_genotype_allsnps(data)
     left = list(left)
@@ -2633,6 +2744,8 @@ def qpwave_ranktest(
     max_nfev: int | None = None,
 ) -> dict:
     mat = qpw.matrix
+    if rank < 0:
+        raise ValueError("rank must be non-negative")
     if rank >= min(mat.shape):
         raise ValueError("rank must be smaller than min(number of left contrasts, number of right contrasts)")
     cov = np.asarray(qpw.cov, float)
@@ -2698,8 +2811,23 @@ def qpwave_multi(
     models = _models_frame(models)
     if "allsnps" not in kwargs:
         kwargs["allsnps"] = _default_genotype_allsnps(data)
-    source = f4_model_cache(data, models, verbose=verbose, **kwargs) if use_cache else data
-    qp_kwargs = {} if use_cache else kwargs
+    resampling = _validate_resampling(kwargs.pop("resampling", "pairwise_counts"))
+    source = (
+        f4_model_cache(
+            data,
+            models,
+            resampling=resampling,
+            verbose=verbose,
+            **kwargs,
+        )
+        if use_cache
+        else data
+    )
+    qp_kwargs = (
+        {"resampling": resampling}
+        if use_cache
+        else {**kwargs, "resampling": resampling}
+    )
     rows = []
     for model_i, row in enumerate(models.itertuples(index=False), start=1):
         left = _model_left_with_target(row)
@@ -3018,7 +3146,9 @@ def _weights_covariance(qpw: QpWaveStats, qinv: np.ndarray, rank: int, fudge: fl
     wmat = wmat[keep]
     if len(wmat) < 2:
         return np.full((wmat.shape[1], wmat.shape[1]), np.nan)
-    return np.cov(wmat * math.sqrt(len(wmat) - 1), rowvar=False)
+    num_replicates = len(wmat)
+    scale = (num_replicates - 1) / math.sqrt(num_replicates)
+    return np.cov(wmat * scale, rowvar=False)
 
 
 def qpadm(
@@ -3048,6 +3178,10 @@ def qpadm(
         raise ValueError("At least one source/left population is required")
     if len(right) < 1:
         raise ValueError("At least one right/reference population is required")
+    if target in sources:
+        raise ValueError(
+            f"target {target!r} should not also appear among source/left populations"
+        )
     if "allsnps" not in kwargs:
         kwargs["allsnps"] = _default_genotype_allsnps(data)
     left_full = [target] + [p for p in sources if p != target]
@@ -3100,6 +3234,8 @@ def qpadm_multi(
             _require_unique_pops(_as_pop_list(row.left), "left")
         except ValueError as err:
             raise ValueError(f"Model {model_i}: {err}") from None
+    if models.empty:
+        return pd.DataFrame()
     qpadm_keys = {"fudge", "fudge_twice", "iterations", "getcov", "return_f4", "return_stats", "return_cov"}
     if "allsnps" not in kwargs:
         kwargs["allsnps"] = _default_genotype_allsnps(data)
