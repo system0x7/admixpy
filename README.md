@@ -50,9 +50,6 @@ python -m pip install -r requirements.txt
 Supported input layouts include EIGENSTRAT text, packed AncestryMap, TGENO, and
 SNP-major PLINK binary files (`.bed/.bim/.fam`). For `.geno/.snp/.ind` inputs,
 the genotype layout is detected from the file header/size; TGENO can also be provided as `.tgeno/.snp/.ind`.
-For fastest repeated f-statistic workloads, prefer SNP-major binary formats such
-as packed AncestryMap or PLINK `.bed/.bim/.fam`; TGENO is supported, but its
-sample-major layout is usually less efficient for SNP-block scans.
 
 ## Basic API
 
