@@ -56,12 +56,22 @@ the genotype layout is detected from the file header/size; TGENO can also be pro
 The main convenience wrappers are:
 
 ```python
-admixpy.f2(data, pop1=None, pop2=None, **kwargs)
-admixpy.fst(data, pop1=None, pop2=None, **kwargs)
-admixpy.f3(data, pop1, pop2, pop3, **kwargs)
-admixpy.f4(data, pop1, pop2, pop3, pop4, allsnps=True, **kwargs)
-admixpy.qpwave(data, left, right, ranks=None, allsnps=True, **kwargs)
-admixpy.qpadm(data, target, left, right, allsnps=True, **kwargs)
+admixpy.f2(data, pop1=None, pop2=None, *, unique_only=True,
+           resampling="pairwise_counts", **kwargs)
+admixpy.fst(data, pop1=None, pop2=None, *, unique_only=True,
+            resampling="pairwise_counts", fst_aggregation="block_ratios",
+            **kwargs)
+admixpy.f3(data, pop1=None, pop2=None, pop3=None, *, unique_only=True,
+           resampling="pairwise_counts", verbose=True, **kwargs)
+admixpy.f4(data, pop1, pop2=None, pop3=None, pop4=None, *, comb=True,
+           unique_only=True, afprod=False, verbose=True, **kwargs)
+admixpy.qpwave(data, left, right, ranks=None, left_base=None,
+               right_base=None, rcond=1e-10, diag=0.0, max_nfev=None,
+               verbose=True, **kwargs)
+admixpy.qpadm(data, target, left=None, right=None, sources=None,
+              fudge=0.0001, fudge_twice=False, iterations=20, getcov=True,
+              return_f4=False, return_stats=False, return_cov=False,
+              verbose=True, **kwargs)
 ```
 
 `data` can be a supported genotype dataset prefix or precomputed f2 data.
@@ -69,11 +79,11 @@ Population arguments can be strings or lists where the wrapper supports multiple
 combinations. For PLINK `.bed/.bim/.fam` input, population labels are read from
 the FID column of the `.fam` file.
 
-For direct genotype input, `f4`, `qpwave`, and `qpadm` default to
-`allsnps=True`, matching the ADMIXTOOLS1-style behavior of estimating each f4
-statistic from its available SNPs. Use `allsnps=False` to restrict the model to
-SNPs shared across the required populations. Precomputed f2 input keeps the
-standard f2-based behavior.
+For direct genotype input, `f3`, `f4`, `qpwave`, and `qpadm` default to
+`allsnps=True`, matching the ADMIXTOOLS1-style behavior of estimating each
+statistic from its available SNPs. For precomputed f2 input, `allsnps` defaults
+to `False` and the standard f2-based behavior is used. Pass `allsnps=False` to
+restrict direct-genotype models to SNPs shared across the required populations.
 
 Direct genotype `f3` also defaults to `allsnps=True` and is calculated per SNP.
 By default, its corrected numerator is divided by unbiased target
