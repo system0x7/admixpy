@@ -20,7 +20,7 @@ Check that the package imports:
 python -c "import admixpy; print(admixpy.__version__)"
 ```
 
-### Installing from source
+## Alternative: installing from source
 
 Create and activate a virtual environment:
 
@@ -43,15 +43,7 @@ cd /path/to/admixpy
 git pull --ff-only
 ```
 
-After updating, run the two installation commands in Setup again.
-
-## Alternative
-
-If you only want to install the dependencies without installing the package:
-
-```bash
-python -m pip install -r requirements.txt
-```
+After updating, run the two source installation commands above again.
 
 ## Examples
 
