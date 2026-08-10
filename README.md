@@ -8,9 +8,17 @@ Fast Python implementation of ADMIXTOOLS-style f-statistics, qpAdm, and qpWave.
 
 Requires Python 3.10 or newer.
 
+Using a virtual environment is recommended:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
 Install the latest release from PyPI:
 
 ```bash
+python -m pip install --upgrade pip
 python -m pip install admixpy
 ```
 
