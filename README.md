@@ -20,6 +20,14 @@ Check that the package imports:
 python -c "import admixpy; print(admixpy.__version__)"
 ```
 
+### Updating
+
+Upgrade an existing installation to the latest release:
+
+```bash
+python -m pip install --upgrade admixpy
+```
+
 ## Alternative: installing from source
 
 Create and activate a virtual environment:
@@ -35,15 +43,6 @@ Install the package from `pyproject.toml`:
 python -m pip install --upgrade pip
 python -m pip install -e .
 ```
-
-### Updating an existing clone
-
-```bash
-cd /path/to/admixpy
-git pull --ff-only
-```
-
-After updating, run the two source installation commands above again.
 
 ## Examples
 
