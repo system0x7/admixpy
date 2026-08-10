@@ -816,7 +816,6 @@ def discard_from_aftable(
         if auto_only:
             unparsable = chrom.isna().to_numpy()
             if unparsable.any():
-                # Match admixtools: warn and drop, rather than refuse to load.
                 bad = sorted(set(snp.loc[unparsable, "CHR"].astype(str)))[:6]
                 warnings.warn(
                     f"Dropping {int(unparsable.sum())} SNPs on non-numeric chromosomes "

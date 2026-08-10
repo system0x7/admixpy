@@ -1,3 +1,5 @@
+__version__ = "1.0.0"
+
 from .fstats import (
     BlockStats,
     F2Blocks,
@@ -62,6 +64,7 @@ from .genotypes import (
 )
 
 __all__ = [
+    "__version__",
     "AfData",
     "BlockStats",
     "F2Blocks",

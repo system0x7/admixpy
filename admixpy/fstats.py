@@ -195,8 +195,7 @@ class BlockStats:
         out = self.rows.copy()
         ratio_num = getattr(self, "ratio_num", None)
         # In allsnps mode the per-stat per-block SNP counts are attached as
-        # `snp_counts`; in that case report each stat with its own block sizes
-        # (matches admixtools::jack_dat_stats, the formula used by qpdstat-allsnps).
+        # `snp_counts`; report each statistic using its own effective block sizes.
         snp_counts = getattr(self, "snp_counts", None)
         if ratio_num is not None:
             est_vec = np.asarray(self.est, float)
@@ -1096,9 +1095,8 @@ def _count_jackknife(block_ests: np.ndarray, n_per_block: np.ndarray) -> _CountJ
 
 def _jack_stats_per_stat(block_ests: np.ndarray, n_per_block: np.ndarray) -> tuple[float, float]:
     # Per-stat block jackknife where each stat has its own per-block SNP count
-    # (allsnps mode). Mirrors admixtools::est_to_loo_dat + jack_dat_stats, which
-    # use the 'tot' form of cpp_jack_vec_stats. Blocks with n=0 or non-finite
-    # block estimate are dropped.
+    # (allsnps mode). Blocks with no contributing SNPs or a non-finite estimate
+    # are excluded before computing unequal-delete-block pseudovalues.
     jack = _count_jackknife(block_ests, n_per_block)
     keep = jack.contributes & np.isfinite(jack.influence)
     if int(np.sum(keep)) < 2:
@@ -1132,10 +1130,9 @@ def _jack_ratio_stats(
     valid_loo = np.isfinite(loo) & np.isfinite(h) & (h > 1)
     if not np.all(valid_loo):
         return float(total), float("nan")
-    # Unequal-delete-block jackknife, matching the `tot` form used by
-    # admixtools::jack_dat_stats while recomputing the nonlinear ratio.
-    # Report the full-data ratio as the point estimate and use the
-    # bias-corrected jackknife center only for the variance calculation.
+    # Recompute the nonlinear ratio for each unequal-delete block. Report the
+    # full-data ratio as the point estimate and use the bias-corrected
+    # jackknife center only for the variance calculation.
     jack_center = float(np.sum(total - loo) + np.sum(loo * n) / total_n)
     tau = h * total - (h - 1.0) * loo
     var = float(np.mean((tau - jack_center) ** 2 / (h - 1.0)))
@@ -1149,10 +1146,9 @@ def _ratio_block_jackknife(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Jackknife ratios of pooled block components.
 
-    This mirrors admixtools' ``est_to_loo_dat`` followed by
-    ``jack_dat_stats`` for the numerator/denominator direct-f3 path. Inputs
-    are statistic-by-block matrices of component means and their effective
-    block weights (normally contributing SNP counts).
+    Inputs are statistic-by-block matrices of component means and their
+    effective block weights, normally contributing SNP counts. Components are
+    pooled before full-data and leave-one-block-out ratios are formed.
     """
     num = np.asarray(block_num_means, float)
     den = np.asarray(block_den_means, float)
@@ -2350,7 +2346,7 @@ def f3_stats_from_geno(
     populations repeated across the two contrasts. With distinct A, B, and C,
     this is A, so a singleton B or C remains estimable. Unless
     ``outgroupmode=True``, the corrected numerator is normalized by unbiased
-    target heterozygosity, matching direct-genotype ADMIXTOOLS 2 behavior.
+    target heterozygosity.
     """
     cols = ["pop1", "pop2", "pop3"]
     missing_cols = [col for col in cols if col not in popcombs.columns]
@@ -3001,10 +2997,10 @@ def qpadm_popdrop(
 
 
 def _popdrop_nested_chain(out: pd.DataFrame, nsources: int):
-    # Mirrors admixtools::qpadm_popdrop: 'best' is the seed of all (rnk-1)-rank
-    # rows plus, for each lower rank r in (rnk-2..1), the lowest-chisq feasible
-    # child of any pattern already in the chain. dofdiff/chisqdiff/p_nested are
-    # filled only on chain rows, sequentially along descending dof.
+    # Start with every model that drops exactly one source. For each model size
+    # that drops additional sources, add the feasible model with the smallest
+    # chi-square among those obtainable by dropping one more source from a
+    # model already selected. Compute nested differences along this chain.
     n = len(out)
     best = np.zeros(n, dtype=bool)
     dofdiff = np.full(n, np.nan)

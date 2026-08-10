@@ -4,9 +4,23 @@ Fast Python implementation of ADMIXTOOLS-style f-statistics, qpAdm, and qpWave.
 
 > Fast f-statistics, qpAdm, and qpWave in Python.
 
-## Setup
+## Installation
 
 Requires Python 3.10 or newer.
+
+Install the latest release from PyPI:
+
+```bash
+python -m pip install admixpy
+```
+
+Check that the package imports:
+
+```bash
+python -c "import admixpy; print(admixpy.__version__)"
+```
+
+### Installing from source
 
 Create and activate a virtual environment:
 
@@ -20,12 +34,6 @@ Install the package from `pyproject.toml`:
 ```bash
 python -m pip install --upgrade pip
 python -m pip install -e .
-```
-
-Check that the package imports:
-
-```bash
-python -c "import admixpy; print(admixpy.__file__)"
 ```
 
 ### Updating an existing clone
@@ -73,6 +81,9 @@ admixpy.qpadm(data, target, left=None, right=None, sources=None,
               return_f4=False, return_stats=False, return_cov=False,
               verbose=True, **kwargs)
 ```
+
+The main convenience wrappers are `f2`, `fst`, `f3`, `f4`, `qpwave`, and
+`qpadm`.
 
 `data` can be a supported genotype dataset prefix or precomputed f2 data.
 Population arguments can be strings or lists where the wrapper supports multiple
