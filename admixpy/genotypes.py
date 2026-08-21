@@ -240,11 +240,12 @@ def _detect_pseudohaploid(geno: np.ndarray, indvec: np.ndarray, ntest: int | boo
     if not ntest:
         return ploidy
     n = _ntest(ntest, geno.shape[0])
-    for i in np.where(indvec >= 0)[0]:
-        vals = geno[:n, i]
-        vals = vals[np.isfinite(vals)]
-        if vals.size and not np.any(vals == 1):
-            ploidy[i] = 1
+    selected = np.flatnonzero(indvec >= 0)
+    if selected.size:
+        vals = geno[:n, selected]
+        observed = np.isfinite(vals).any(axis=0)
+        has_heterozygous = (vals == 1).any(axis=0)
+        ploidy[selected[observed & ~has_heterozygous]] = 1
     return ploidy
 
 
@@ -811,7 +812,13 @@ def discard_from_aftable(
             minac = np.nanmin(cm[:, popmask], axis=1)
         poly = is_polymorphic(afs) if poly_only else np.ones(len(snp), dtype=bool)
         outgroupaf = afs[outpop].to_numpy(float) if outpop is not None else np.full(len(snp), 0.5)
-        chrom = pd.to_numeric(snp["CHR"].astype(str).str.replace(r"[A-Za-z]+", "", regex=True), errors="coerce")
+        chrom = pd.to_numeric(snp["CHR"], errors="coerce")
+        nonnumeric = chrom.isna()
+        if nonnumeric.any():
+            chrom.loc[nonnumeric] = pd.to_numeric(
+                snp.loc[nonnumeric, "CHR"].astype(str).str.replace(r"[A-Za-z]+", "", regex=True),
+                errors="coerce",
+            )
         chrom_num = chrom.to_numpy()
         if auto_only:
             unparsable = chrom.isna().to_numpy()
@@ -825,10 +832,16 @@ def discard_from_aftable(
             chrom_num = np.where(unparsable, 99, chrom_num)  # 99 fails the CHR <= 22 filter
         mut = np.full(len(snp), "", dtype=object)
         if not transitions or not transversions:
-            a1 = snp["A1"].astype(str).str.upper()
-            a2 = snp["A2"].astype(str).str.upper()
-            pairs = ["".join(sorted(x)) for x in zip(a1, a2)]
-            mut = np.array(["transition" if p in {"AG", "CT"} else "transversion" if p in {"AC", "AT", "CG", "GT"} else "" for p in pairs])
+            a1 = snp["A1"].astype(str).str.upper().to_numpy(dtype=str)
+            a2 = snp["A2"].astype(str).str.upper().to_numpy(dtype=str)
+            pairs = np.char.add(a1, a2)
+            is_transition = np.isin(pairs, ("AG", "GA", "CT", "TC"))
+            is_transversion = np.isin(
+                pairs,
+                ("AC", "CA", "AT", "TA", "CG", "GC", "GT", "TG"),
+            )
+            mut[is_transition] = "transition"
+            mut[is_transversion] = "transversion"
         keep = (
             (miss <= maxmiss)
             & (maf >= minmaf)
@@ -862,7 +875,13 @@ def get_block_lengths(dat: pd.DataFrame, blgsize: float = 0.05) -> np.ndarray:
             warnings.warn(f"No genetic linkage map found; defining blocks by {blgsize:g} bp")
         else:
             warnings.warn("No usable map or base positions found; each chromosome is one block")
-    chrom = pd.to_numeric(dat["CHR"].astype(str).str.extract(r"(\d+)")[0], errors="coerce")
+    chrom = pd.to_numeric(dat["CHR"], errors="coerce")
+    nonnumeric = chrom.isna()
+    if nonnumeric.any():
+        chrom.loc[nonnumeric] = pd.to_numeric(
+            dat.loc[nonnumeric, "CHR"].astype(str).str.extract(r"(\d+)")[0],
+            errors="coerce",
+        )
     if chrom.isna().any():
         chrom = pd.factorize(dat["CHR"])[0] + 1
     else:

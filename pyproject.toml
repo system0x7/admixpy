@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "admixpy"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Fast Python implementation of ADMIXTOOLS-style f-statistics, qpadm, and qpwave"
 readme = "README.md"
 license = "MIT"
@@ -37,3 +37,6 @@ Issues = "https://github.com/system0x7/admixpy/issues"
 
 [tool.setuptools.packages.find]
 include = ["admixpy*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "admixpy.__version__" }

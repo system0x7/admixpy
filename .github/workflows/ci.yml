@@ -35,7 +35,7 @@ jobs:
           python -m venv /tmp/admixpy-smoke
           /tmp/admixpy-smoke/bin/python -m pip install --no-cache-dir dist/*.whl
           cd /tmp
-          /tmp/admixpy-smoke/bin/python -c "import admixpy; assert admixpy.__version__ == '1.0.0'"
+          /tmp/admixpy-smoke/bin/python -c "from importlib.metadata import version; import admixpy; assert admixpy.__version__ == version('admixpy')"
       - uses: actions/upload-artifact@v4
         with:
           name: distributions

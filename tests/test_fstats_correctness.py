@@ -25,6 +25,7 @@ from admixpy.fstats import (
     f4_stats_from_geno,
     f4_model_cache,
     _f3_direct_blocks_from_afs,
+    _influence_covariance,
     jackknife_cov,
     mats_to_f2arr,
     qp3pop,
@@ -35,7 +36,154 @@ from admixpy.fstats import (
     stats_to_loo,
     write_f2,
 )
-from admixpy.genotypes import AfData, _parse_geno_header_with_kind, iter_geno_to_afs
+from admixpy.genotypes import (
+    AfData,
+    _detect_pseudohaploid,
+    _parse_geno_header_with_kind,
+    discard_from_aftable,
+    get_block_lengths,
+    iter_geno_to_afs,
+)
+
+
+def _reference_influence_covariance(influence, contributes):
+    influence = np.asarray(influence, float)
+    contributes = np.asarray(contributes, bool)
+    cov = np.full((len(influence), len(influence)), np.nan)
+    for i in range(len(influence)):
+        for j in range(i, len(influence)):
+            keep = (
+                contributes[i]
+                & contributes[j]
+                & np.isfinite(influence[i])
+                & np.isfinite(influence[j])
+            )
+            if keep.sum() >= 2:
+                cov[i, j] = cov[j, i] = np.mean(influence[i, keep] * influence[j, keep])
+    return cov
+
+
+def _reference_jackknife_covariance(loo, block_lengths, estimates, contributes):
+    loo = np.asarray(loo, float)
+    block_lengths = np.asarray(block_lengths, float)
+    estimates = np.asarray(estimates, float)
+    contributes = np.asarray(contributes, bool)
+    cov = np.full((len(loo), len(loo)), np.nan)
+    for i in range(len(loo)):
+        for j in range(i, len(loo)):
+            keep = (
+                contributes[i]
+                & contributes[j]
+                & np.isfinite(loo[i])
+                & np.isfinite(loo[j])
+            )
+            if keep.sum() >= 2:
+                h = block_lengths[keep].sum() / block_lengths[keep]
+                cov[i, j] = cov[j, i] = np.mean(
+                    (estimates[i] - loo[i, keep])
+                    * (estimates[j] - loo[j, keep])
+                    * (h - 1)
+                )
+    return cov
+
+
+class LowRiskOptimizationEquivalenceTests(unittest.TestCase):
+    def test_vectorized_influence_covariance_matches_pairwise_reference(self):
+        rng = np.random.default_rng(123)
+        influence = rng.normal(size=(12, 17))
+        contributes = rng.random(influence.shape) > 0.25
+        influence[rng.random(influence.shape) < 0.1] = np.nan
+        expected = _reference_influence_covariance(influence, contributes)
+        actual = _influence_covariance(influence, contributes)
+        np.testing.assert_allclose(actual, expected, equal_nan=True, rtol=1e-13, atol=1e-13)
+
+    def test_vectorized_jackknife_covariance_matches_pairwise_reference(self):
+        rng = np.random.default_rng(456)
+        loo = rng.normal(size=(10, 19))
+        contributes = rng.random(loo.shape) > 0.2
+        loo[rng.random(loo.shape) < 0.1] = np.nan
+        block_lengths = rng.integers(1, 20, size=loo.shape[1]).astype(float)
+        estimates = rng.normal(size=loo.shape[0])
+        expected = _reference_jackknife_covariance(
+            loo,
+            block_lengths,
+            estimates,
+            contributes,
+        )
+        actual, returned_estimates = jackknife_cov(
+            loo,
+            block_lengths,
+            est=estimates,
+            contributes=contributes,
+        )
+        np.testing.assert_array_equal(returned_estimates, estimates)
+        np.testing.assert_allclose(actual, expected, equal_nan=True, rtol=1e-13, atol=1e-13)
+
+    def test_vectorized_pseudohaploid_detection_preserves_rules(self):
+        geno = np.array(
+            [
+                [0.0, 0.0, np.nan, 0.0],
+                [2.0, 1.0, np.nan, 2.0],
+                [np.nan, 2.0, np.nan, 0.0],
+            ]
+        )
+        actual = _detect_pseudohaploid(geno, np.array([0, 0, 1, -1]), True)
+        np.testing.assert_array_equal(actual, [1.0, 2.0, 2.0, 2.0])
+
+    def test_numeric_and_prefixed_chromosomes_produce_same_blocks(self):
+        base = pd.DataFrame(
+            {
+                "CHR": [1, 1, 1, 2, 2],
+                "cm": [0.0, 0.01, 0.07, 0.0, 0.08],
+                "POS": [1, 2, 3, 1, 2],
+            }
+        )
+        prefixed = base.copy()
+        prefixed["CHR"] = "chr" + prefixed["CHR"].astype(str)
+        np.testing.assert_array_equal(
+            get_block_lengths(base),
+            get_block_lengths(prefixed),
+        )
+
+    def test_prefixed_autosomes_still_pass_filtering(self):
+        snp_ids = ["s1", "s22", "sx"]
+        afs = pd.DataFrame({"A": 0.25, "B": 0.75}, index=snp_ids)
+        counts = pd.DataFrame(4.0, index=snp_ids, columns=afs.columns)
+        snps = pd.DataFrame(
+            {
+                "SNP": snp_ids,
+                "CHR": ["chr1", "chr22", "chrX"],
+                "cm": [0.0, 0.0, 0.0],
+                "POS": [1, 2, 3],
+                "A1": "A",
+                "A2": "G",
+            }
+        )
+        with self.assertWarnsRegex(UserWarning, "non-numeric chromosomes"):
+            filtered = discard_from_aftable(AfData(afs, counts, snps))
+        self.assertEqual(filtered.snpfile["SNP"].tolist(), ["s1", "s22"])
+
+    def test_vectorized_mutation_classification_handles_both_orientations(self):
+        pairs = [("A", "G"), ("G", "A"), ("C", "T"), ("T", "C"), ("A", "C"), ("C", "A")]
+        snp_ids = [f"s{i}" for i in range(len(pairs))]
+        afs = pd.DataFrame({"A": 0.25, "B": 0.75}, index=snp_ids)
+        counts = pd.DataFrame(4.0, index=snp_ids, columns=afs.columns)
+        snps = pd.DataFrame(
+            {
+                "SNP": snp_ids,
+                "CHR": 1,
+                "cm": np.arange(len(pairs), dtype=float),
+                "POS": np.arange(len(pairs)),
+                "A1": [pair[0] for pair in pairs],
+                "A2": [pair[1] for pair in pairs],
+            }
+        )
+        filtered = discard_from_aftable(
+            AfData(afs, counts, snps),
+            transitions=False,
+            transversions=True,
+        )
+        self.assertEqual(filtered.snpfile["SNP"].tolist(), ["s4", "s5"])
 
 
 class DirectGenotypeDefaultsTests(unittest.TestCase):
@@ -851,21 +999,43 @@ class DirectF3Tests(unittest.TestCase):
         self.assertAlmostEqual(raw.loc[0, "est"], 5 / 36)
         self.assertNotAlmostEqual(normalized.loc[0, "est"], raw.loc[0, "est"])
 
-    def test_singleton_target_remains_unestimable_when_correcting(self):
+    def test_singleton_target_raises_clear_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             pref = self._write_singleton_source_eigenstrat(Path(tmp))
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
+            for stream in (False, True):
+                with self.subTest(stream=stream):
+                    with self.assertRaises(ValueError) as caught:
+                        qp3pop(
+                            pref,
+                            "C",
+                            "A",
+                            "B",
+                            blgsize=0.05,
+                            stream=stream,
+                            verbose=False,
+                        )
+                    message = str(caught.exception)
+                    self.assertIn("f3 target population cannot be estimated", message)
+                    self.assertIn("'C'", message)
+                    self.assertIn("pseudohaploid singleton", message)
+
+    def test_singleton_target_allows_explicit_uncorrected_raw_f3(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_singleton_source_eigenstrat(Path(tmp))
+            with self.assertWarnsRegex(RuntimeWarning, "apply_corr=False"):
                 out = qp3pop(
-                    pref, "C", "A", "B", blgsize=0.05, stream=True, verbose=False
+                    pref,
+                    "C",
+                    "A",
+                    "B",
+                    blgsize=0.05,
+                    apply_corr=False,
+                    outgroupmode=True,
+                    verbose=False,
                 )
-        self.assertEqual(len(caught), 1)
-        self.assertIs(caught[0].category, RuntimeWarning)
-        self.assertIn("f3 bias correction requires at least two", str(caught[0].message))
-        self.assertIn("count < 2 in 2 of 3 blocks", str(caught[0].message))
-        self.assertTrue(np.isnan(out.loc[0, "est"]))
-        self.assertTrue(np.isnan(out.loc[0, "se"]))
-        self.assertEqual(out.loc[0, "n"], 0)
+        self.assertTrue(np.isfinite(out.loc[0, "est"]))
+        self.assertTrue(np.isfinite(out.loc[0, "se"]))
+        self.assertGreater(out.loc[0, "n"], 0)
 
     def test_streaming_f4_singleton_warning_is_summarized_once(self):
         with tempfile.TemporaryDirectory() as tmp:

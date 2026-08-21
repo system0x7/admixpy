@@ -2,6 +2,15 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.0.1 - 2026-08-21
+
+### Changed
+
+- Improved direct f3/f4, covariance, chromosome parsing, mutation filtering,
+  and pseudohaploid-detection performance.
+- Raise a clear error when a pseudohaploid singleton is used as an f3 target
+  requiring bias correction or target-heterozygosity normalization.
+
 ## 1.0.0 - 2026-08-10
 
 First stable release.

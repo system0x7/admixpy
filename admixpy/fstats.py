@@ -1239,23 +1239,20 @@ def jackknife_cov(
         )
     else:
         est_vec = np.asarray(est, float)
-    cov = np.full((loo.shape[0], loo.shape[0]), np.nan)
-    for i in range(loo.shape[0]):
-        for j in range(i, loo.shape[0]):
-            keep = (
-                contributes[i]
-                & contributes[j]
-                & np.isfinite(loo[i])
-                & np.isfinite(loo[j])
-            )
-            if int(np.sum(keep)) >= 2:
-                h = bl[keep].sum() / bl[keep]
-                val = np.mean(
-                    (est_vec[i] - loo[i, keep])
-                    * (est_vec[j] - loo[j, keep])
-                    * (h - 1)
-                )
-                cov[i, j] = cov[j, i] = val
+    valid = contributes & np.isfinite(loo)
+    mask = valid.astype(float)
+    pair_counts = mask @ mask.T
+    pair_lengths = (mask * bl[None, :]) @ mask.T
+    finite_est = np.isfinite(est_vec)
+    deltas = np.where(valid & finite_est[:, None], est_vec[:, None] - loo, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        weighted_deltas = deltas / np.sqrt(bl)[None, :]
+        weighted_products = weighted_deltas @ weighted_deltas.T
+        products = deltas @ deltas.T
+        numer = pair_lengths * weighted_products - products
+    cov = np.full((loo.shape[0], loo.shape[0]), np.nan, dtype=float)
+    usable = (pair_counts >= 2) & finite_est[:, None] & finite_est[None, :]
+    np.divide(numer, pair_counts, out=cov, where=usable)
     return cov, est_vec
 
 
@@ -1412,19 +1409,13 @@ def f3_from_f2(blocks: F2Blocks, pop1: str, pop2: str, pop3: str) -> np.ndarray:
 def _influence_covariance(influence: np.ndarray, contributes: np.ndarray) -> np.ndarray:
     influence = np.asarray(influence, float)
     contributes = np.asarray(contributes, bool)
-    nstats = influence.shape[0]
-    cov = np.full((nstats, nstats), np.nan, dtype=float)
-    for i in range(nstats):
-        for j in range(i, nstats):
-            keep = (
-                contributes[i]
-                & contributes[j]
-                & np.isfinite(influence[i])
-                & np.isfinite(influence[j])
-            )
-            if int(np.sum(keep)) >= 2:
-                value = float(np.mean(influence[i, keep] * influence[j, keep]))
-                cov[i, j] = cov[j, i] = value
+    valid = contributes & np.isfinite(influence)
+    mask = valid.astype(float)
+    pair_counts = mask @ mask.T
+    values = np.where(valid, influence, 0.0)
+    products = values @ values.T
+    cov = np.full(pair_counts.shape, np.nan, dtype=float)
+    np.divide(products, pair_counts, out=cov, where=pair_counts >= 2)
     return cov
 
 
@@ -1432,11 +1423,11 @@ def _influence_variances(influence: np.ndarray, contributes: np.ndarray) -> np.n
     # Return only covariance diagonal entries (for custom usage)
     influence = np.asarray(influence, float)
     contributes = np.asarray(contributes, bool)
+    valid = contributes & np.isfinite(influence)
+    counts = valid.sum(axis=1)
+    sums = np.sum(np.where(valid, influence * influence, 0.0), axis=1)
     variances = np.full(influence.shape[0], np.nan, dtype=float)
-    for i in range(influence.shape[0]):
-        keep = contributes[i] & np.isfinite(influence[i])
-        if int(np.sum(keep)) >= 2:
-            variances[i] = float(np.mean(influence[i, keep] ** 2))
+    np.divide(sums, counts, out=variances, where=counts >= 2)
     return variances
 
 
@@ -1703,9 +1694,11 @@ def _f4_direct_blocks_from_afs(
     arr = afdat.afs.to_numpy(float)
     count_arr = afdat.counts.to_numpy(float)
     pop_i = {p: i for i, p in enumerate(pops)}
-    idx = np.asarray([[pop_i[getattr(row, c)] for c in cols] for row in combos.itertuples(index=False)], dtype=int)
+    combo_rows = tuple(combos.itertuples(index=False))
+    model_values = combos["model"].to_numpy()
+    idx = np.asarray([[pop_i[getattr(row, c)] for c in cols] for row in combo_rows], dtype=int)
     correction_coefficients = np.zeros((len(combos), len(pops)), dtype=float)
-    for stat_i, row in enumerate(combos.itertuples(index=False)):
+    for stat_i, row in enumerate(combo_rows):
         first: dict[str, float] = {}
         second: dict[str, float] = {}
         first[row.pop1] = first.get(row.pop1, 0.0) + 1.0
@@ -1714,6 +1707,10 @@ def _f4_direct_blocks_from_afs(
         second[row.pop4] = second.get(row.pop4, 0.0) - 1.0
         for pop in set(first) | set(second):
             correction_coefficients[stat_i, pop_i[pop]] = first.get(pop, 0.0) * second.get(pop, 0.0)
+    required_by_stat = tuple(
+        np.flatnonzero(correction_coefficients[stat_i] != 0)
+        for stat_i in range(len(combos))
+    )
     correction_pops = np.flatnonzero(np.any(correction_coefficients != 0, axis=0))
     block_lengths = get_block_lengths(afdat.snpfile, blgsize)
     if correction_pops.size:
@@ -1755,13 +1752,13 @@ def _f4_direct_blocks_from_afs(
         _log_block(f"direct {stat_name}", b, len(block_lengths), start, stop, verbose)
         block = arr[start:stop]
         count_block = count_arr[start:stop]
-        for stat_i, row in enumerate(combos.itertuples(index=False)):
-            p = idx[stat_i]
+        block_snpwt = None if snpwt is None else snpwt[start:stop]
+        for stat_i, p in enumerate(idx):
             vals = block[:, p]
             use = (
                 np.isfinite(vals).all(axis=1)
                 if allsnps
-                else use_by_model[getattr(row, "model")][start:stop].copy()
+                else use_by_model[model_values[stat_i]][start:stop].copy()
             )
             if allsnps and poly_only:
                 finite_vals = vals[use]
@@ -1772,7 +1769,7 @@ def _f4_direct_blocks_from_afs(
                         & (np.min(finite_vals, axis=1) < 1)
                     )
             correction = correction_coefficients[stat_i]
-            required = np.flatnonzero(correction != 0)
+            required = required_by_stat[stat_i]
             if apply_corr and required.size:
                 use &= np.isfinite(count_block[:, required]).all(axis=1)
                 use &= (count_block[:, required] > 1).all(axis=1)
@@ -1790,17 +1787,17 @@ def _f4_direct_blocks_from_afs(
                         count_block[use, pop_idx],
                     )
                     f4vals = f4vals - correction[pop_idx] * corr
-            if snpwt is not None:
-                f4vals = f4vals * snpwt[start:stop][use]
+            if block_snpwt is not None:
+                f4vals = f4vals * block_snpwt[use]
             out[stat_i, b] = float(np.mean(f4vals))
             if normalize_by_target_het:
                 target_p = block[use, target_idx]
                 target_n = count_block[use, target_idx]
                 target_het = 2.0 * target_p * (1.0 - target_p) * target_n / (target_n - 1.0)
-                if snpwt is not None:
+                if block_snpwt is not None:
                     # Normalized f3 is a ratio of two SNP-weighted sums.  Apply
                     # the same optional outgroup weight to both components.
-                    target_het = target_het * snpwt[start:stop][use]
+                    target_het = target_het * block_snpwt[use]
                 denominator[stat_i, b] = float(np.mean(target_het))
             snp_counts[stat_i, b] = int(use.sum())
         start = stop
@@ -1938,6 +1935,20 @@ def _f3_direct_blocks_from_afs(
     if missing_cols:
         raise ValueError(f"f3 combinations are missing columns: {missing_cols}")
     combos = combos.reset_index(drop=True).copy()
+    if singleton_warning is None:
+        target_has_two = {}
+        for pop in combos["pop1"].unique():
+            af = afdat.afs[pop].to_numpy(float)
+            count = afdat.counts[pop].to_numpy(float)
+            target_has_two[pop] = bool(
+                np.any(np.isfinite(af) & np.isfinite(count) & (count > 1))
+            )
+        _validate_f3_targets(
+            combos,
+            target_has_two,
+            apply_corr=apply_corr,
+            outgroupmode=outgroupmode,
+        )
     mapped = pd.DataFrame(
         {
             "pop1": combos["pop1"],
@@ -1964,6 +1975,32 @@ def _f3_direct_blocks_from_afs(
     stats.rows = combos[cols].copy()
     stats.stat = "f3"
     return stats
+
+
+def _validate_f3_targets(
+    combos: pd.DataFrame,
+    has_two_observations: dict[str, bool],
+    *,
+    apply_corr: bool,
+    outgroupmode: bool,
+) -> None:
+    target = combos["pop1"]
+    requires_two = np.full(len(combos), not outgroupmode, dtype=bool)
+    if apply_corr:
+        requires_two |= (target != combos["pop2"]) & (target != combos["pop3"])
+    required_targets = dict.fromkeys(target[requires_two])
+    unavailable = [
+        pop for pop in required_targets if not has_two_observations.get(pop, False)
+    ]
+    if unavailable:
+        names = ", ".join(repr(pop) for pop in unavailable)
+        population_word = "population" if len(unavailable) == 1 else "populations"
+        raise ValueError(
+            f"f3 target {population_word} cannot be estimated because no retained SNP has "
+            f"at least two independent allele observations: {names}. "
+            "A pseudohaploid singleton cannot be used as an f3 target with "
+            "apply_corr=True or outgroupmode=False."
+        )
 
 
 def _concat_afdata(parts: Sequence[AfData]) -> AfData:
@@ -2165,6 +2202,7 @@ def _f3_stats_from_geno_stream(
 
     keep_chunks: list[np.ndarray] = []
     retained_snp_parts: list[pd.DataFrame] = []
+    target_has_two = {pop: False for pop in popcombs["pop1"].unique()}
     first_stream = iter_geno_to_afs(
         pref,
         pops=pops,
@@ -2199,8 +2237,22 @@ def _f3_stats_from_geno_stream(
                 raise
             keep = np.zeros(len(chunk.snpfile), dtype=bool)
         keep_chunks.append(keep)
+        for pop, already_usable in target_has_two.items():
+            if already_usable or not np.any(keep):
+                continue
+            af = chunk.afs[pop].to_numpy(float)
+            count = chunk.counts[pop].to_numpy(float)
+            target_has_two[pop] = bool(
+                np.any(keep & np.isfinite(af) & np.isfinite(count) & (count > 1))
+            )
     if not retained_snp_parts:
         raise ValueError("No SNPs remain after filtering")
+    _validate_f3_targets(
+        popcombs,
+        target_has_two,
+        apply_corr=apply_corr,
+        outgroupmode=outgroupmode,
+    )
 
     retained_snp = pd.concat(retained_snp_parts, ignore_index=True)
     block_lengths = get_block_lengths(retained_snp, blgsize)
