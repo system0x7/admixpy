@@ -205,17 +205,18 @@ class DirectGenotypeDefaultsTests(unittest.TestCase):
 
 
 class HudsonFstTests(unittest.TestCase):
-    def test_singleton_warning_limits_affected_populations(self):
+    def test_singleton_warning_omits_affected_populations(self):
         message = _singleton_warning_message(
             "f4",
             True,
             affected_blocks=3,
             total_blocks=10,
-            affected_populations=["A", "B", "C", "D", "E", "F"],
         )
-        self.assertIn("Affected populations (first 4 of 6): 'A', 'B', 'C', 'D'", message)
-        self.assertIn("... and 2 more", message)
-        self.assertNotIn("'E'", message)
+        self.assertEqual(
+            message,
+            "f4 bias correction requires at least two independent allele observations; "
+            "excluding affected SNP values with count < 2 in 3 of 10 blocks",
+        )
 
     def test_apply_corr_false_uses_raw_hudson_denominator(self):
         p1, p2 = np.array([[0.25]]), np.array([[0.75]])
@@ -248,10 +249,11 @@ class HudsonFstTests(unittest.TestCase):
         self.assertTrue(np.isnan(f2arr[0, 0, 0]))
         self.assertTrue(any("at least two" in str(item.message) for item in caught))
 
-    def test_singleton_warning_names_affected_population(self):
+    def test_singleton_warning_omits_affected_population(self):
         p1, p2 = np.array([[0.0]]), np.array([[0.5]])
         c1, c2 = np.array([[1.0]]), np.array([[4.0]])
-        with self.assertWarnsRegex(RuntimeWarning, "Affected populations: 'A'"):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
             mats_to_f2arr(
                 p1,
                 p2,
@@ -262,6 +264,9 @@ class HudsonFstTests(unittest.TestCase):
                 verbose=False,
                 population_labels=(["A"], ["B"]),
             )
+        self.assertEqual(len(caught), 1)
+        self.assertNotIn("Affected populations", str(caught[0].message))
+        self.assertNotIn("'A'", str(caught[0].message))
 
     def test_singletons_are_explicitly_biased_when_not_correcting(self):
         p1, p2 = np.array([[0.0]]), np.array([[0.5]])
@@ -1136,7 +1141,7 @@ class DirectF3Tests(unittest.TestCase):
         self.assertIs(caught[0].category, RuntimeWarning)
         self.assertIn("f4 bias correction requires at least two", str(caught[0].message))
         self.assertIn("count < 2 in 2 of 3 blocks", str(caught[0].message))
-        self.assertIn("Affected populations: 'C'", str(caught[0].message))
+        self.assertNotIn("Affected populations", str(caught[0].message))
 
     def test_pairwise_f4_errors_instead_of_returning_nonfinite_estimate(self):
         with tempfile.TemporaryDirectory() as tmp:

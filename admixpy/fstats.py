@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import combinations, combinations_with_replacement, product
 import math
 import warnings
@@ -369,25 +369,6 @@ def _singleton_observation_rows(*pairs: tuple[np.ndarray, np.ndarray]) -> np.nda
     return np.asarray([], dtype=bool) if affected is None else affected
 
 
-def _singleton_observation_labels(
-    pairs: Sequence[tuple[np.ndarray, np.ndarray]],
-    population_labels: Sequence[Sequence[str]] | None,
-) -> list[str]:
-    if population_labels is None:
-        return []
-    if len(population_labels) != len(pairs):
-        raise ValueError("population_labels must match the singleton-observation inputs")
-    affected = []
-    for (afs, counts), labels in zip(pairs, population_labels):
-        values = np.isfinite(afs) & np.isfinite(counts) & (counts < 2)
-        by_population = np.asarray([np.any(values)]) if values.ndim == 1 else np.any(values, axis=0)
-        labels = list(labels)
-        if len(labels) != len(by_population):
-            raise ValueError("population_labels must match the allele-frequency columns")
-        affected.extend(label for label, bad in zip(labels, by_population) if bad)
-    return list(dict.fromkeys(affected))
-
-
 def _count_affected_blocks(affected_rows: np.ndarray, block_lengths: Sequence[int]) -> int:
     affected_rows = np.asarray(affected_rows, bool)
     start = 0
@@ -406,28 +387,16 @@ def _singleton_warning_message(
     apply_corr: bool,
     affected_blocks: int,
     total_blocks: int,
-    affected_populations: Sequence[str] = (),
 ) -> str:
     impact = "in 1 block" if total_blocks == 1 else f"in {affected_blocks} of {total_blocks} blocks"
-    population_note = ""
-    if affected_populations:
-        limit = 4
-        shown = affected_populations[:limit]
-        names = ", ".join(repr(pop) for pop in shown)
-        if len(affected_populations) > limit:
-            names += f", ... and {len(affected_populations) - limit} more"
-            label = f"Affected populations (first {limit} of {len(affected_populations)})"
-        else:
-            label = "Affected populations"
-        population_note = f". {label}: {names}"
     if apply_corr:
         return (
             f"{stat} bias correction requires at least two independent allele observations; "
-            f"excluding affected SNP values with count < 2 {impact}{population_note}"
+            f"excluding affected SNP values with count < 2 {impact}"
         )
     return (
         f"{stat} used values with fewer than two independent allele observations {impact}; "
-        f"estimates may be sampling-biased because apply_corr=False{population_note}"
+        "estimates may be sampling-biased because apply_corr=False"
     )
 
 
@@ -436,7 +405,6 @@ class _SingletonWarningSummary:
     stat: str
     apply_corr: bool
     affected_blocks: int = 0
-    affected_populations: list[str] = field(default_factory=list)
 
     def observe(
         self,
@@ -446,8 +414,6 @@ class _SingletonWarningSummary:
     ) -> None:
         affected_rows = _singleton_observation_rows(*pairs)
         self.affected_blocks += _count_affected_blocks(affected_rows, block_lengths)
-        labels = _singleton_observation_labels(pairs, population_labels)
-        self.affected_populations = list(dict.fromkeys(self.affected_populations + labels))
 
     def warn(self, total_blocks: int, *, stacklevel: int) -> None:
         if not self.affected_blocks:
@@ -458,7 +424,6 @@ class _SingletonWarningSummary:
                 self.apply_corr,
                 self.affected_blocks,
                 total_blocks,
-                self.affected_populations,
             ),
             RuntimeWarning,
             stacklevel=stacklevel,
@@ -479,8 +444,7 @@ def _warn_singleton_observations(
         block_lengths = [len(affected_rows)]
     total_blocks = len(block_lengths)
     affected_blocks = _count_affected_blocks(affected_rows, block_lengths)
-    labels = _singleton_observation_labels(pairs, population_labels)
-    message = _singleton_warning_message(stat, apply_corr, affected_blocks, total_blocks, labels)
+    message = _singleton_warning_message(stat, apply_corr, affected_blocks, total_blocks)
     warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 

@@ -2,6 +2,12 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.0.4 - 2026-08-26
+
+### Changed
+
+- Simplified singleton-observation warnings by omitting affected population names.
+
 ## 1.0.3 - 2026-08-26
 
 ### Changed
