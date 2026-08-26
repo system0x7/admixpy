@@ -1,6 +1,6 @@
 # AdmixPy
 
-Fast Python implementation of ADMIXTOOLS-style f-statistics, qpAdm, and qpWave.
+Python implementation of ADMIXTOOLS-style f-statistics, qpAdm, and qpWave.
 
 > Fast f-statistics, qpAdm, and qpWave in Python.
 
@@ -81,9 +81,6 @@ admixpy.qpadm(data, target, left=None, right=None, sources=None,
               verbose=True, **kwargs)
 ```
 
-The main convenience wrappers are `f2`, `fst`, `f3`, `f4`, `qpwave`, and
-`qpadm`.
-
 `data` can be a supported genotype dataset prefix or precomputed f2 data.
 Population arguments can be strings or lists where the wrapper supports multiple
 combinations. For PLINK `.bed/.bim/.fam` input, population labels are read from
@@ -100,22 +97,6 @@ By default, its corrected numerator is divided by unbiased target
 heterozygosity. Set `outgroupmode=True` to return the unnormalized f3 numerator;
 that raw mode is directly comparable to f2-derived f3 and to original `qp3Pop`
 outgroup mode after removing the latter's factor of 1000.
-
-| Data | Scope | Recommended setting |
-|---|---|---|
-| Known modern diploid data | All direct genotype statistics | Keep defaults (ploidy auto-detected), or set `adjust_pseudohaploid=False` to force known diploid data |
-| Ancient or mixed-ploidy data | All direct genotype statistics | `adjust_pseudohaploid=True, apply_corr=True` (auto-detected per sample) |
-| ADMIXTOOLS2-normalized direct f3 | f3 only | `outgroupmode=False` (default) |
-| Raw/original outgroup f3 | f3 only | `outgroupmode=True` |
-| Diploid singleton target or repeated source | f3 only | Keep `apply_corr=True`; two called alleles make correction possible |
-| Pseudohaploid singleton used only as a distinct source | f3 only | Allowed with `apply_corr=True` because it occurs linearly |
-| Pseudohaploid singleton target or repeated source | f3 only | Unbiased correction is not possible; affected SNPs are excluded |
-| Intentionally biased singleton estimate | f3 only | `outgroupmode=True, apply_corr=False`; exploratory/legacy |
-| Missingness differs among populations or blocks | f2, FST, f3, and cached f4 | `resampling="pairwise_counts"` (default) |
-| In-memory blocks without SNP counts | Precomputed-block workflows | `resampling="nominal_blocks"`; incomplete on-disk caches must be rebuilt |
-| Maximum available SNPs per combination | Direct f3/f4, qpWave, and qpAdm | `allsnps=True` (direct-genotype default) |
-| Common SNP set across a model | Direct f3/f4, qpWave, and qpAdm | `allsnps=False` |
-| Use only polymorphic sites | Direct f-statistics | `poly_only=True` (drops non-polymorphic sites) |
 
 Direct f3 and f4 genotype calculations (including the f4 calculations
 for qpAdm and qpWave) read the genotype file once by default and hold the
@@ -146,6 +127,10 @@ behavior in which every pair uses nominal block sizes. Raw-genotype f4 with
 `allsnps=True` already uses per-statistic counts on a common SNP intersection.
 Cached pairwise f3/f4 instead defines a pairwise-available estimator and cannot
 reconstruct that common intersection.
+
+F2 cache creation and reading retain blocks with missing pair estimates by
+default (`remove_na=False`). Set `remove_na=True` to discard every block that
+is not finite (`NaN`) for all requested population pairs.
 
 FST cache files additionally retain numerator and denominator sums. The
 default `fst_aggregation="block_ratios"` averages stored block estimates.

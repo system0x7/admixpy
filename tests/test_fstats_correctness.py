@@ -31,6 +31,7 @@ from admixpy.fstats import (
     qp3pop,
     qpadm,
     qpdstat,
+    qpwave,
     qpwave_f4stats,
     read_f2,
     stats_to_loo,
@@ -233,6 +234,21 @@ class HudsonFstTests(unittest.TestCase):
         self.assertEqual(counts[0, 0, 0], 0)
         self.assertTrue(np.isnan(f2arr[0, 0, 0]))
         self.assertTrue(any("at least two" in str(item.message) for item in caught))
+
+    def test_singleton_warning_names_affected_population(self):
+        p1, p2 = np.array([[0.0]]), np.array([[0.5]])
+        c1, c2 = np.array([[1.0]]), np.array([[4.0]])
+        with self.assertWarnsRegex(RuntimeWarning, "Affected populations: 'A'"):
+            mats_to_f2arr(
+                p1,
+                p2,
+                c1,
+                c2,
+                [1],
+                apply_corr=True,
+                verbose=False,
+                population_labels=(["A"], ["B"]),
+            )
 
     def test_singletons_are_explicitly_biased_when_not_correcting(self):
         p1, p2 = np.array([[0.0]]), np.array([[0.5]])
@@ -1037,25 +1053,69 @@ class DirectF3Tests(unittest.TestCase):
         self.assertTrue(np.isfinite(out.loc[0, "se"]))
         self.assertGreater(out.loc[0, "n"], 0)
 
+    def test_f2_remove_na_error_names_nonfinite_pairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_singleton_source_eigenstrat(Path(tmp))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    r"No blocks remain with remove_na=True\. Non-finite f2 pairs: \('A', 'C'\)\.",
+                ):
+                    f2_from_geno(
+                        pref,
+                        pops=["A", "C"],
+                        maxmiss=1,
+                        poly_only=False,
+                        remove_na=True,
+                        verbose=False,
+                    )
+
     def test_streaming_f4_singleton_warning_is_summarized_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             pref = self._write_singleton_source_eigenstrat(Path(tmp))
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
-                qpdstat(
-                    pref,
-                    "C",
-                    "A",
-                    "C",
-                    "B",
-                    blgsize=0.05,
-                    stream=True,
-                    verbose=False,
-                )
+                with self.assertRaisesRegex(ValueError, "f4 produced 1 non-finite estimate"):
+                    qpdstat(
+                        pref,
+                        "C",
+                        "A",
+                        "C",
+                        "B",
+                        blgsize=0.05,
+                        stream=True,
+                        verbose=False,
+                    )
         self.assertEqual(len(caught), 1)
         self.assertIs(caught[0].category, RuntimeWarning)
         self.assertIn("f4 bias correction requires at least two", str(caught[0].message))
         self.assertIn("count < 2 in 2 of 3 blocks", str(caught[0].message))
+        self.assertIn("Affected populations: 'C'", str(caught[0].message))
+
+    def test_pairwise_f4_errors_instead_of_returning_nonfinite_estimate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_singleton_source_eigenstrat(Path(tmp))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                with self.assertRaises(ValueError) as caught:
+                    qpdstat(
+                        pref,
+                        "C",
+                        "A",
+                        "C",
+                        "B",
+                        allsnps=False,
+                        blgsize=0.05,
+                        verbose=False,
+                    )
+        message = str(caught.exception)
+        self.assertIn("f4 produced 1 non-finite estimate", message)
+        self.assertIn("f4(C, A; C, B)", message)
+        self.assertIn("Bias correction needs allele count >= 2", message)
+        self.assertIn("Use allsnps=True", message)
+        self.assertIn("apply_corr=False", message)
+        self.assertIn("all four populations", message)
 
     def test_complete_direct_f3_matches_f2_derived_f3(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1272,6 +1332,45 @@ class QpAdmValidationTests(unittest.TestCase):
         self.assertIn("f4(S1, Target; R1, R0)", message)
         self.assertIn("f4(S2, Target; R1, R0)", message)
         self.assertIn("pseudohaploid singletons", message)
+
+    def test_qpwave_error_names_contrasts_with_nonfinite_covariance(self):
+        rows = pd.DataFrame(
+            [
+                {"pop1": "S1", "pop2": "Target", "pop3": "R1", "pop4": "R0"},
+                {"pop1": "S2", "pop2": "Target", "pop3": "R1", "pop4": "R0"},
+            ]
+        )
+        f4 = BlockStats(
+            rows=rows,
+            blocks=np.zeros((2, 2)),
+            block_lengths=np.ones(2),
+            stat="f4",
+            loo=np.zeros((2, 2)),
+            est=np.array([0.1, 0.2]),
+            cov=np.array([[1.0, np.nan], [np.nan, 1.0]]),
+        )
+        qpw = QpWaveStats(
+            f4=f4,
+            left=["Target", "S1", "S2"],
+            right=["R0", "R1"],
+            left_base="Target",
+            right_base="R0",
+            row_pops=["S1", "S2"],
+            col_pops=["R1"],
+        )
+        with patch("admixpy.fstats.qpwave_f4stats", return_value=qpw):
+            with self.assertRaises(ValueError) as ctx:
+                qpwave(
+                    "unused",
+                    ["Target", "S1", "S2"],
+                    ["R0", "R1"],
+                    allsnps=False,
+                    verbose=False,
+                )
+        message = str(ctx.exception)
+        self.assertIn("qpWave cannot test ranks", message)
+        self.assertIn("f4(S1, Target; R1, R0)", message)
+        self.assertIn("f4(S2, Target; R1, R0)", message)
 
 
 if __name__ == "__main__":

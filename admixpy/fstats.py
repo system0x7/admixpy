@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import combinations, combinations_with_replacement, product
 import math
 import warnings
@@ -369,6 +369,25 @@ def _singleton_observation_rows(*pairs: tuple[np.ndarray, np.ndarray]) -> np.nda
     return np.asarray([], dtype=bool) if affected is None else affected
 
 
+def _singleton_observation_labels(
+    pairs: Sequence[tuple[np.ndarray, np.ndarray]],
+    population_labels: Sequence[Sequence[str]] | None,
+) -> list[str]:
+    if population_labels is None:
+        return []
+    if len(population_labels) != len(pairs):
+        raise ValueError("population_labels must match the singleton-observation inputs")
+    affected = []
+    for (afs, counts), labels in zip(pairs, population_labels):
+        values = np.isfinite(afs) & np.isfinite(counts) & (counts < 2)
+        by_population = np.asarray([np.any(values)]) if values.ndim == 1 else np.any(values, axis=0)
+        labels = list(labels)
+        if len(labels) != len(by_population):
+            raise ValueError("population_labels must match the allele-frequency columns")
+        affected.extend(label for label, bad in zip(labels, by_population) if bad)
+    return list(dict.fromkeys(affected))
+
+
 def _count_affected_blocks(affected_rows: np.ndarray, block_lengths: Sequence[int]) -> int:
     affected_rows = np.asarray(affected_rows, bool)
     start = 0
@@ -387,16 +406,22 @@ def _singleton_warning_message(
     apply_corr: bool,
     affected_blocks: int,
     total_blocks: int,
+    affected_populations: Sequence[str] = (),
 ) -> str:
     impact = "in 1 block" if total_blocks == 1 else f"in {affected_blocks} of {total_blocks} blocks"
+    population_note = ""
+    if affected_populations:
+        names = ", ".join(repr(pop) for pop in affected_populations)
+        population_note = f". Affected populations: {names}"
     if apply_corr:
         return (
             f"{stat} bias correction requires at least two independent allele observations; "
-            f"excluding affected SNP values with count < 2 {impact}"
+            f"excluding affected SNP values with count < 2 {impact}{population_note}"
         )
     return (
         f"{stat} includes affected SNP values with count < 2 because apply_corr=False; "
-        f"those values cannot be estimated without sampling bias; affected values occurred {impact}"
+        f"those values cannot be estimated without sampling bias; affected values occurred "
+        f"{impact}{population_note}"
     )
 
 
@@ -405,14 +430,18 @@ class _SingletonWarningSummary:
     stat: str
     apply_corr: bool
     affected_blocks: int = 0
+    affected_populations: list[str] = field(default_factory=list)
 
     def observe(
         self,
         block_lengths: Sequence[int],
         *pairs: tuple[np.ndarray, np.ndarray],
+        population_labels: Sequence[Sequence[str]] | None = None,
     ) -> None:
         affected_rows = _singleton_observation_rows(*pairs)
         self.affected_blocks += _count_affected_blocks(affected_rows, block_lengths)
+        labels = _singleton_observation_labels(pairs, population_labels)
+        self.affected_populations = list(dict.fromkeys(self.affected_populations + labels))
 
     def warn(self, total_blocks: int, *, stacklevel: int) -> None:
         if not self.affected_blocks:
@@ -423,6 +452,7 @@ class _SingletonWarningSummary:
                 self.apply_corr,
                 self.affected_blocks,
                 total_blocks,
+                self.affected_populations,
             ),
             RuntimeWarning,
             stacklevel=stacklevel,
@@ -434,6 +464,7 @@ def _warn_singleton_observations(
     apply_corr: bool,
     *pairs: tuple[np.ndarray, np.ndarray],
     block_lengths: Sequence[int] | None = None,
+    population_labels: Sequence[Sequence[str]] | None = None,
 ) -> None:
     affected_rows = _singleton_observation_rows(*pairs)
     if not np.any(affected_rows):
@@ -442,7 +473,8 @@ def _warn_singleton_observations(
         block_lengths = [len(affected_rows)]
     total_blocks = len(block_lengths)
     affected_blocks = _count_affected_blocks(affected_rows, block_lengths)
-    message = _singleton_warning_message(stat, apply_corr, affected_blocks, total_blocks)
+    labels = _singleton_observation_labels(pairs, population_labels)
+    message = _singleton_warning_message(stat, apply_corr, affected_blocks, total_blocks, labels)
     warnings.warn(message, RuntimeWarning, stacklevel=3)
 
 
@@ -463,6 +495,7 @@ def mats_to_f2arr(
     snpwt: np.ndarray | None = None,
     apply_corr: bool = True,
     verbose: bool = False,
+    population_labels: Sequence[Sequence[str]] | None = None,
 ) -> np.ndarray:
     a1, a2 = np.asarray(afmat1, float), np.asarray(afmat2, float)
     c1, c2 = np.asarray(countmat1, float), np.asarray(countmat2, float)
@@ -474,6 +507,7 @@ def mats_to_f2arr(
         (a1, c1),
         (a2, c2),
         block_lengths=block_lengths,
+        population_labels=population_labels,
     )
     start = 0
     for b, n in enumerate(block_lengths):
@@ -534,6 +568,7 @@ def _hudson_fst_components(
     snpwt=None,
     apply_corr=True,
     verbose: bool = False,
+    population_labels: Sequence[Sequence[str]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     a1, a2 = np.asarray(afmat1, float), np.asarray(afmat2, float)
     c1, c2 = np.asarray(countmat1, float), np.asarray(countmat2, float)
@@ -548,6 +583,7 @@ def _hudson_fst_components(
         (a1, c1),
         (a2, c2),
         block_lengths=block_lengths,
+        population_labels=population_labels,
     )
     start = 0
     for b, n in enumerate(block_lengths):
@@ -631,7 +667,17 @@ def afs_to_f2_blocks(
         snpwt = snpwt_all[use] if snpwt_all is not None else None
         fst_num = fst_den = None
         if stat == "f2":
-            arr = mats_to_f2arr(a1, a2, c1, c2, bl, snpwt, apply_corr, verbose=verbose)
+            arr = mats_to_f2arr(
+                a1,
+                a2,
+                c1,
+                c2,
+                bl,
+                snpwt,
+                apply_corr,
+                verbose=verbose,
+                population_labels=(pops1, pops2),
+            )
             count_a1, count_a2 = a1.copy(), a2.copy()
             if apply_corr:
                 count_a1 = count_a1.mask(c1 <= 1)
@@ -652,6 +698,7 @@ def afs_to_f2_blocks(
                 snpwt,
                 apply_corr,
                 verbose=verbose,
+                population_labels=(pops1, pops2),
             )
         else:
             raise ValueError(stat)
@@ -697,7 +744,7 @@ def f2_from_geno(
     adjust_pseudohaploid=True,
     chunk_size: int = 10_000,
     tgeno_chunked: bool = False,
-    remove_na: bool = True,
+    remove_na: bool = False,
     apply_corr: bool = True,
     verbose: bool = True,
 ) -> F2Blocks:
@@ -753,7 +800,22 @@ def f2_from_geno(
     if remove_na:
         keep = np.isfinite(blocks.data).all(axis=(0, 1))
         if not np.any(keep):
-            raise ValueError("No blocks remain after discarding blocks with missing values")
+            bad_pairs = np.any(~np.isfinite(blocks.data), axis=2)
+            affected = []
+            seen = set()
+            for i, j in np.argwhere(bad_pairs):
+                pair = (blocks.pops1[i], blocks.pops2[j])
+                key = tuple(sorted(pair))
+                if key not in seen:
+                    seen.add(key)
+                    affected.append(pair)
+            shown = ", ".join(repr(pair) for pair in affected[:8])
+            if len(affected) > 8:
+                shown += f", ... and {len(affected) - 8} more"
+            stat = "FST" if blocks.stat == "fst" else blocks.stat
+            raise ValueError(
+                f"No blocks remain with remove_na=True. Non-finite {stat} pairs: {shown}."
+            )
         blocks = blocks.select_blocks(keep)
     return blocks
 
@@ -910,7 +972,7 @@ def write_f2(blocks: F2Blocks, outdir: str | Path, overwrite: bool = False):
             np.savez_compressed(path, **payload)
 
 
-def read_f2(f2_dir: str | Path, pops: Sequence[str] | None = None, pops2: Sequence[str] | None = None, type: str = "f2", remove_na: bool = True) -> F2Blocks:
+def read_f2(f2_dir: str | Path, pops: Sequence[str] | None = None, pops2: Sequence[str] | None = None, type: str = "f2", remove_na: bool = False) -> F2Blocks:
     f2_dir = Path(f2_dir)
     if pops is None:
         pops = sorted(p.name for p in f2_dir.iterdir() if p.is_dir())
@@ -968,7 +1030,7 @@ def get_f2(data, pops=None, pops2=None, **kwargs) -> F2Blocks:
                 type_ = "ap"
             else:
                 type_ = "f2"
-        return read_f2(data, pops, pops2, type=type_, remove_na=kwargs.get("remove_na", True))
+        return read_f2(data, pops, pops2, type=type_, remove_na=kwargs.get("remove_na", False))
     return f2_from_geno(data, pops=pops, pops2=pops2, **kwargs)
 
 
@@ -1712,6 +1774,7 @@ def _f4_direct_blocks_from_afs(
         for stat_i in range(len(combos))
     )
     correction_pops = np.flatnonzero(np.any(correction_coefficients != 0, axis=0))
+    correction_labels = [pops[i] for i in correction_pops]
     block_lengths = get_block_lengths(afdat.snpfile, blgsize)
     if correction_pops.size:
         pairs = ((arr[:, correction_pops], count_arr[:, correction_pops]),)
@@ -1721,9 +1784,14 @@ def _f4_direct_blocks_from_afs(
                 apply_corr,
                 *pairs,
                 block_lengths=block_lengths,
+                population_labels=(correction_labels,),
             )
         else:
-            singleton_warning.observe(block_lengths, *pairs)
+            singleton_warning.observe(
+                block_lengths,
+                *pairs,
+                population_labels=(correction_labels,),
+            )
     nstats = len(combos)
     out = np.full((nstats, len(block_lengths)), np.nan, dtype=float)
     denominator = np.full_like(out, np.nan) if normalize_by_target_het else None
@@ -2656,6 +2724,35 @@ def qpdstat(
         **kwargs,
     )
     out = stats.to_frame()
+    bad_est = ~np.isfinite(out["est"].to_numpy(float))
+    if np.any(bad_est):
+        rows = out.loc[bad_est, ["pop1", "pop2", "pop3", "pop4"]]
+        labels = [
+            f"  - f4({row.pop1}, {row.pop2}; {row.pop3}, {row.pop4})"
+            for row in rows.head(8).itertuples(index=False)
+        ]
+        if len(rows) > len(labels):
+            labels.append(f"  - ... and {len(rows) - len(labels)} more")
+        count = int(bad_est.sum())
+        hint = "This usually means that the affected contrast has insufficient usable population coverage."
+        if bool(kwargs.get("apply_corr", True)):
+            if not bool(kwargs["allsnps"]):
+                hint = (
+                    "Bias correction needs allele count >= 2. Use allsnps=True, or "
+                    "apply_corr=False when all four populations in each contrast are distinct."
+                )
+            else:
+                hint = (
+                    "With apply_corr=True, a repeated population in an f4 contrast can "
+                    "require at least two independent allele observations. A pseudohaploid "
+                    "singleton cannot supply that finite-sample correction."
+                )
+        raise ValueError(
+            f"f4 produced {count} non-finite estimate{'s' if count != 1 else ''}:\n"
+            + "\n".join(labels)
+            + "\n"
+            + hint
+        )
     snp_counts = getattr(stats, "snp_counts", None)
     if snp_counts is not None:
         out["n"] = np.sum(snp_counts, axis=1).astype(int)
@@ -2843,7 +2940,15 @@ def qpwave(
     verbose: bool = True,
     **kwargs,
 ) -> pd.DataFrame:
+    if "allsnps" not in kwargs:
+        kwargs["allsnps"] = _default_genotype_allsnps(data)
     qpw = qpwave_f4stats(data, left, right, left_base=left_base, right_base=right_base, verbose=verbose, **kwargs)
+    _validate_f4_inputs(
+        qpw,
+        allsnps=bool(kwargs["allsnps"]),
+        caller="qpWave",
+        action="test ranks",
+    )
     max_rank = min(qpw.matrix.shape) - 1
     ranks = range(max_rank + 1) if ranks is None else ranks
     rows = []
@@ -3125,13 +3230,19 @@ def _qinv_from_cov(cov: np.ndarray, fudge: float, fudge_twice: bool = False) -> 
         return linalg.pinv(cov)
 
 
-def _validate_qpadm_f4(qpw: QpWaveStats, *, allsnps: bool) -> None:
+def _validate_f4_inputs(
+    qpw: QpWaveStats,
+    *,
+    allsnps: bool,
+    caller: str,
+    action: str,
+) -> None:
     estimates = np.asarray(qpw.matrix, float).reshape(-1)
     cov = np.asarray(qpw.cov, float)
     expected_shape = (len(estimates), len(estimates))
     if cov.shape != expected_shape:
         raise ValueError(
-            f"qpAdm expected an f4 covariance matrix with shape {expected_shape}, "
+            f"{caller} expected an f4 covariance matrix with shape {expected_shape}, "
             f"but received {cov.shape}"
         )
 
@@ -3176,12 +3287,21 @@ def _validate_qpadm_f4(qpw: QpWaveStats, *, allsnps: bool) -> None:
             "statistics."
         )
     raise ValueError(
-        "qpAdm cannot fit the model because its f4 inputs contain "
+        f"{caller} cannot {action} because its f4 inputs contain "
         + " and ".join(problems)
         + ". Affected contrasts:\n"
         + "\n".join(labels)
         + "\n"
         + hint
+    )
+
+
+def _validate_qpadm_f4(qpw: QpWaveStats, *, allsnps: bool) -> None:
+    _validate_f4_inputs(
+        qpw,
+        allsnps=allsnps,
+        caller="qpAdm",
+        action="fit the model",
     )
 
 
