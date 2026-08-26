@@ -16,6 +16,7 @@ from admixpy.fstats import (
     _qinv_from_cov,
     _hudson_fst,
     _hudson_fst_components,
+    _singleton_warning_message,
     afs_to_f2_blocks,
     f2,
     f2_from_geno,
@@ -204,6 +205,18 @@ class DirectGenotypeDefaultsTests(unittest.TestCase):
 
 
 class HudsonFstTests(unittest.TestCase):
+    def test_singleton_warning_limits_affected_populations(self):
+        message = _singleton_warning_message(
+            "f4",
+            True,
+            affected_blocks=3,
+            total_blocks=10,
+            affected_populations=["A", "B", "C", "D", "E", "F"],
+        )
+        self.assertIn("Affected populations (first 4 of 6): 'A', 'B', 'C', 'D'", message)
+        self.assertIn("... and 2 more", message)
+        self.assertNotIn("'E'", message)
+
     def test_apply_corr_false_uses_raw_hudson_denominator(self):
         p1, p2 = np.array([[0.25]]), np.array([[0.75]])
         c1 = c2 = np.array([[4.0]])
@@ -253,7 +266,7 @@ class HudsonFstTests(unittest.TestCase):
     def test_singletons_are_explicitly_biased_when_not_correcting(self):
         p1, p2 = np.array([[0.0]]), np.array([[0.5]])
         c1, c2 = np.array([[1.0]]), np.array([[4.0]])
-        with self.assertWarnsRegex(RuntimeWarning, "sampling bias"):
+        with self.assertWarnsRegex(RuntimeWarning, "sampling-biased"):
             got = _hudson_fst(p1, p2, c1, c2, [1], apply_corr=False, verbose=False)[0, 0, 0]
         self.assertAlmostEqual(got, 0.5)
 
@@ -735,6 +748,38 @@ class RawF4Tests(unittest.TestCase):
         np.testing.assert_allclose(from_variances.variances, [25.0, 16.0])
         np.testing.assert_allclose(from_variances.se, [5.0, 4.0])
 
+    def test_f4_block_cache_limits_missing_contrasts(self):
+        cached_combos = pd.DataFrame(
+            [{"pop1": "A", "pop2": "B", "pop3": "C", "pop4": "D"}]
+        )
+        cached_stats = BlockStats(
+            rows=cached_combos,
+            blocks=np.zeros((1, 3)),
+            block_lengths=np.ones(3),
+            stat="f4",
+            est=np.array([0.1]),
+            cov=np.array([[1.0]]),
+        )
+        requested = pd.DataFrame(
+            [
+                {"pop1": f"S{i}", "pop2": "T", "pop3": "R", "pop4": "O"}
+                for i in range(6)
+            ]
+        )
+        with self.assertRaises(ValueError) as ctx:
+            f4_stats(
+                F4BlockCache(cached_stats),
+                requested,
+                unique_only=False,
+                verbose=False,
+            )
+        message = str(ctx.exception)
+        self.assertIn("F4 cache is missing 6 requested contrasts", message)
+        self.assertIn("Missing contrasts (first 4 of 6)", message)
+        self.assertIn("f4(S3, T; R, O)", message)
+        self.assertNotIn("f4(S4, T; R, O)", message)
+        self.assertIn("... and 2 more", message)
+
     def test_covariance_dependent_workflows_reject_diagonal_only_mode(self):
         combos = pd.DataFrame(
             [
@@ -1031,9 +1076,9 @@ class DirectF3Tests(unittest.TestCase):
                             verbose=False,
                         )
                     message = str(caught.exception)
-                    self.assertIn("f3 target population cannot be estimated", message)
+                    self.assertIn("f3 cannot estimate 1 target population", message)
                     self.assertIn("'C'", message)
-                    self.assertIn("pseudohaploid singleton", message)
+                    self.assertIn("For a biased estimate", message)
 
     def test_singleton_target_allows_explicit_uncorrected_raw_f3(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1060,7 +1105,7 @@ class DirectF3Tests(unittest.TestCase):
                 warnings.simplefilter("ignore", RuntimeWarning)
                 with self.assertRaisesRegex(
                     ValueError,
-                    r"No blocks remain with remove_na=True\. Non-finite f2 pairs: \('A', 'C'\)\.",
+                    r"No blocks remain after remove_na=True: non-finite f2 values affect 1 population pair",
                 ):
                     f2_from_geno(
                         pref,
@@ -1112,10 +1157,10 @@ class DirectF3Tests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("f4 produced 1 non-finite estimate", message)
         self.assertIn("f4(C, A; C, B)", message)
-        self.assertIn("Bias correction needs allele count >= 2", message)
-        self.assertIn("Use allsnps=True", message)
+        self.assertIn("pseudohaploid singletons", message)
+        self.assertIn("allsnps=True", message)
         self.assertIn("apply_corr=False", message)
-        self.assertIn("all four populations", message)
+        self.assertIn("four distinct populations", message)
 
     def test_complete_direct_f3_matches_f2_derived_f3(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1332,6 +1377,42 @@ class QpAdmValidationTests(unittest.TestCase):
         self.assertIn("f4(S1, Target; R1, R0)", message)
         self.assertIn("f4(S2, Target; R1, R0)", message)
         self.assertIn("pseudohaploid singletons", message)
+        self.assertIn("set apply_corr=False", message)
+
+    def test_qpadm_error_does_not_recommend_disabled_correction(self):
+        rows = pd.DataFrame(
+            [{"pop1": "S1", "pop2": "Target", "pop3": "R1", "pop4": "R0"}]
+        )
+        f4 = BlockStats(
+            rows=rows,
+            blocks=np.zeros((1, 2)),
+            block_lengths=np.ones(2),
+            stat="f4",
+            loo=np.zeros((1, 2)),
+            est=np.array([np.nan]),
+            cov=np.array([[np.nan]]),
+        )
+        qpw = QpWaveStats(
+            f4=f4,
+            left=["Target", "S1"],
+            right=["R0", "R1"],
+            left_base="Target",
+            right_base="R0",
+            row_pops=["S1"],
+            col_pops=["R1"],
+        )
+        with patch("admixpy.fstats.qpwave_f4stats", return_value=qpw):
+            with self.assertRaises(ValueError) as ctx:
+                qpadm(
+                    "unused",
+                    "Target",
+                    ["S1"],
+                    ["R0", "R1"],
+                    allsnps=False,
+                    apply_corr=False,
+                    verbose=False,
+                )
+        self.assertNotIn("set apply_corr=False", str(ctx.exception))
 
     def test_qpwave_error_names_contrasts_with_nonfinite_covariance(self):
         rows = pd.DataFrame(

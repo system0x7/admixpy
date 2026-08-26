@@ -411,17 +411,23 @@ def _singleton_warning_message(
     impact = "in 1 block" if total_blocks == 1 else f"in {affected_blocks} of {total_blocks} blocks"
     population_note = ""
     if affected_populations:
-        names = ", ".join(repr(pop) for pop in affected_populations)
-        population_note = f". Affected populations: {names}"
+        limit = 4
+        shown = affected_populations[:limit]
+        names = ", ".join(repr(pop) for pop in shown)
+        if len(affected_populations) > limit:
+            names += f", ... and {len(affected_populations) - limit} more"
+            label = f"Affected populations (first {limit} of {len(affected_populations)})"
+        else:
+            label = "Affected populations"
+        population_note = f". {label}: {names}"
     if apply_corr:
         return (
             f"{stat} bias correction requires at least two independent allele observations; "
             f"excluding affected SNP values with count < 2 {impact}{population_note}"
         )
     return (
-        f"{stat} includes affected SNP values with count < 2 because apply_corr=False; "
-        f"those values cannot be estimated without sampling bias; affected values occurred "
-        f"{impact}{population_note}"
+        f"{stat} used values with fewer than two independent allele observations {impact}; "
+        f"estimates may be sampling-biased because apply_corr=False{population_note}"
     )
 
 
@@ -809,12 +815,23 @@ def f2_from_geno(
                 if key not in seen:
                     seen.add(key)
                     affected.append(pair)
-            shown = ", ".join(repr(pair) for pair in affected[:8])
-            if len(affected) > 8:
-                shown += f", ... and {len(affected) - 8} more"
             stat = "FST" if blocks.stat == "fst" else blocks.stat
+            limit = 4
+            labels = [
+                f"  - {stat}({pop1}, {pop2})"
+                for pop1, pop2 in affected[:limit]
+            ]
+            if len(affected) > limit:
+                labels.append(f"  - ... and {len(affected) - limit} more")
+            pair_word = "pair" if len(affected) == 1 else "pairs"
+            heading = _examples_heading("Affected pairs", len(affected), limit)
             raise ValueError(
-                f"No blocks remain with remove_na=True. Non-finite {stat} pairs: {shown}."
+                f"No blocks remain after remove_na=True: non-finite {stat} values affect "
+                f"{len(affected)} population {pair_word}.\n\n"
+                + heading
+                + "\n"
+                + "\n".join(labels)
+                + "\n\nInspect population coverage, or use remove_na=False."
             )
         blocks = blocks.select_blocks(keep)
     return blocks
@@ -1726,6 +1743,24 @@ def _f4_combinations(pop1, pop2, pop3, pop4, comb: bool) -> pd.DataFrame:
     return pd.DataFrame({"pop1": p1, "pop2": p2, "pop3": p3, "pop4": p4})
 
 
+def _format_f4_contrasts(rows: pd.DataFrame, limit: int = 4) -> str:
+    rows = rows.reset_index(drop=True)
+    shown = rows.head(limit)
+    labels = [
+        f"  - f4({row.pop1}, {row.pop2}; {row.pop3}, {row.pop4})"
+        for row in shown.itertuples(index=False)
+    ]
+    if len(rows) > len(shown):
+        labels.append(f"  - ... and {len(rows) - len(shown)} more")
+    return "\n".join(labels)
+
+
+def _examples_heading(label: str, count: int, limit: int = 4) -> str:
+    if count > limit:
+        return f"{label} (first {limit} of {count}):"
+    return f"{label}:"
+
+
 def _f4_direct_blocks_from_afs(
     afdat: AfData,
     combos: pd.DataFrame,
@@ -2061,13 +2096,20 @@ def _validate_f3_targets(
         pop for pop in required_targets if not has_two_observations.get(pop, False)
     ]
     if unavailable:
-        names = ", ".join(repr(pop) for pop in unavailable)
-        population_word = "population" if len(unavailable) == 1 else "populations"
+        limit = 4
+        shown = unavailable[:limit]
+        names = ", ".join(repr(pop) for pop in shown)
+        if len(unavailable) > limit:
+            names += f", ... and {len(unavailable) - limit} more"
+        target_word = "target population" if len(unavailable) == 1 else "target populations"
+        heading = _examples_heading("Affected targets", len(unavailable), limit)
         raise ValueError(
-            f"f3 target {population_word} cannot be estimated because no retained SNP has "
-            f"at least two independent allele observations: {names}. "
-            "A pseudohaploid singleton cannot be used as an f3 target with "
-            "apply_corr=True or outgroupmode=False."
+            f"f3 cannot estimate {len(unavailable)} {target_word}: no retained SNP has "
+            "at least two independent allele observations.\n\n"
+            + heading
+            + " "
+            + names
+            + "\n\nFor a biased estimate, use outgroupmode=True and apply_corr=False."
         )
 
 
@@ -2586,7 +2628,15 @@ def f4_stats(
         ).sort_values("_order")
         if merged["_cache_i"].isna().any():
             missing = combos.loc[merged["_cache_i"].isna().to_numpy(), key]
-            raise ValueError(f"F4 cache does not contain requested combinations:\n{missing}")
+            heading = _examples_heading("Missing contrasts", len(missing))
+            raise ValueError(
+                f"F4 cache is missing {len(missing)} requested "
+                f"contrast{'s' if len(missing) != 1 else ''}.\n\n"
+                + heading
+                + "\n"
+                + _format_f4_contrasts(missing)
+                + "\n\nRebuild the cache with the required models or populations."
+            )
         take = merged["_cache_i"].to_numpy(int)
         blocks = cached.blocks[take] if cached.blocks is not None and keep_blocks else None
         loo = cached.loo[take] if cached.loo is not None and keep_loo else None
@@ -2727,19 +2777,16 @@ def qpdstat(
     bad_est = ~np.isfinite(out["est"].to_numpy(float))
     if np.any(bad_est):
         rows = out.loc[bad_est, ["pop1", "pop2", "pop3", "pop4"]]
-        labels = [
-            f"  - f4({row.pop1}, {row.pop2}; {row.pop3}, {row.pop4})"
-            for row in rows.head(8).itertuples(index=False)
-        ]
-        if len(rows) > len(labels):
-            labels.append(f"  - ... and {len(rows) - len(labels)} more")
         count = int(bad_est.sum())
-        hint = "This usually means that the affected contrast has insufficient usable population coverage."
+        heading = _examples_heading("Affected contrasts", count)
+        hint = "Inspect population coverage and usable jackknife blocks."
         if bool(kwargs.get("apply_corr", True)):
             if not bool(kwargs["allsnps"]):
                 hint = (
-                    "Bias correction needs allele count >= 2. Use allsnps=True, or "
-                    "apply_corr=False when all four populations in each contrast are distinct."
+                    "With allsnps=False, pseudohaploid singletons may make the f2 correction "
+                    "unavailable. For contrasts with four distinct populations, use "
+                    "apply_corr=False. Alternatives: inspect population coverage and usable "
+                    "jackknife blocks, or use allsnps=True with genotype input."
                 )
             else:
                 hint = (
@@ -2748,9 +2795,11 @@ def qpdstat(
                     "singleton cannot supply that finite-sample correction."
                 )
         raise ValueError(
-            f"f4 produced {count} non-finite estimate{'s' if count != 1 else ''}:\n"
-            + "\n".join(labels)
+            f"f4 produced {count} non-finite estimate{'s' if count != 1 else ''}.\n\n"
+            + heading
             + "\n"
+            + _format_f4_contrasts(rows)
+            + "\n\n"
             + hint
         )
     snp_counts = getattr(stats, "snp_counts", None)
@@ -2946,6 +2995,7 @@ def qpwave(
     _validate_f4_inputs(
         qpw,
         allsnps=bool(kwargs["allsnps"]),
+        apply_corr=bool(kwargs.get("apply_corr", True)),
         caller="qpWave",
         action="test ranks",
     )
@@ -3234,6 +3284,7 @@ def _validate_f4_inputs(
     qpw: QpWaveStats,
     *,
     allsnps: bool,
+    apply_corr: bool,
     caller: str,
     action: str,
 ) -> None:
@@ -3256,17 +3307,16 @@ def _validate_f4_inputs(
         affected |= np.any(bad_cov, axis=0) | np.any(bad_cov, axis=1)
     affected_i = np.flatnonzero(affected)
     rows = qpw.f4.rows.reset_index(drop=True)
-    labels = []
-    for stat_i in affected_i[:8]:
-        if stat_i < len(rows) and {"pop1", "pop2", "pop3", "pop4"}.issubset(rows.columns):
-            row = rows.iloc[stat_i]
-            labels.append(
-                f"  - f4({row['pop1']}, {row['pop2']}; {row['pop3']}, {row['pop4']})"
-            )
-        else:
-            labels.append(f"  - f4 contrast {stat_i}")
-    if len(affected_i) > len(labels):
-        labels.append(f"  - ... and {len(affected_i) - len(labels)} more")
+    contrast_columns = {"pop1", "pop2", "pop3", "pop4"}
+    if contrast_columns.issubset(rows.columns) and np.all(affected_i < len(rows)):
+        affected_rows = rows.iloc[affected_i]
+        labels = _format_f4_contrasts(affected_rows)
+    else:
+        limit = 4
+        shown = affected_i[:limit]
+        labels = "\n".join(f"  - f4 contrast {stat_i}" for stat_i in shown)
+        if len(affected_i) > limit:
+            labels += f"\n  - ... and {len(affected_i) - limit} more"
 
     problems = []
     if np.any(bad_est):
@@ -3275,31 +3325,36 @@ def _validate_f4_inputs(
     if np.any(bad_cov):
         nbad = int(bad_cov.sum())
         problems.append(f"{nbad} non-finite covariance entr{'ies' if nbad != 1 else 'y'}")
-    hint = (
-        "This usually means that an affected contrast has fewer than two usable "
-        "jackknife blocks or insufficient population coverage."
-    )
+    hint = "Likely causes: too few usable jackknife blocks or insufficient population coverage."
     if not allsnps:
-        hint += (
-            " With allsnps=False, it can also mean that an unbiased f2 correction "
-            "is unavailable, which is common for pseudohaploid singletons. Inspect "
-            "the listed populations or use allsnps=True for direct-genotype f4 "
-            "statistics."
-        )
+        if apply_corr:
+            hint += (
+                " With allsnps=False, pseudohaploid singletons can also make the f2 "
+                "correction unavailable. For contrasts with four distinct populations, "
+                "set apply_corr=False. Alternatives: inspect the listed populations or "
+                "use allsnps=True with genotype input."
+            )
+        else:
+            hint += (
+                " Inspect the listed populations or use allsnps=True with genotype input."
+            )
     raise ValueError(
         f"{caller} cannot {action} because its f4 inputs contain "
         + " and ".join(problems)
-        + ". Affected contrasts:\n"
-        + "\n".join(labels)
+        + ".\n\n"
+        + _examples_heading("Affected contrasts", len(affected_i))
         + "\n"
+        + labels
+        + "\n\n"
         + hint
     )
 
 
-def _validate_qpadm_f4(qpw: QpWaveStats, *, allsnps: bool) -> None:
+def _validate_qpadm_f4(qpw: QpWaveStats, *, allsnps: bool, apply_corr: bool) -> None:
     _validate_f4_inputs(
         qpw,
         allsnps=allsnps,
+        apply_corr=apply_corr,
         caller="qpAdm",
         action="fit the model",
     )
@@ -3362,7 +3417,11 @@ def qpadm(
         kwargs["allsnps"] = _default_genotype_allsnps(data)
     left_full = [target] + [p for p in sources if p != target]
     qpw = qpwave_f4stats(data, left=left_full, right=right, verbose=verbose, **kwargs)
-    _validate_qpadm_f4(qpw, allsnps=bool(kwargs["allsnps"]))
+    _validate_qpadm_f4(
+        qpw,
+        allsnps=bool(kwargs["allsnps"]),
+        apply_corr=bool(kwargs.get("apply_corr", True)),
+    )
     xmat = qpw.matrix
     qinv = _qinv_from_cov(qpw.cov, fudge=fudge, fudge_twice=fudge_twice)
     rank = len(sources) - 1
