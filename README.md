@@ -91,7 +91,7 @@ For direct genotype input, `f3`, `f4`, `qpwave`, and `qpadm` default to
 statistic from its available SNPs. For precomputed f2 input, `allsnps` defaults
 to `False` and the standard f2-based behavior is used. Pass `allsnps=False` to
 restrict direct-genotype models to SNPs shared across the required populations.
-Both raw-genotype modes use the direct per-SNP estimator and report the exact
+Both direct-genotype modes use the direct per-SNP estimator and report the exact
 SNP count for each statistic; raw input is reduced to pairwise f2 values only
 when explicitly creating an f2 cache. An optional `model` column in an f4
 combination table scopes the shared panel separately for each model.
@@ -127,9 +127,9 @@ AdmixPy uses `resampling="pairwise_counts"` as default for data
 with missing genotypes: each population pair is weighted by the SNP
 observations actually available for that pair. Pairwise `f2` and `fst` result
 tables include `n`. Set `resampling="nominal_blocks"` to reproduce the older
-behavior in which every pair uses nominal block sizes. Raw-genotype f4 with
+behavior in which every pair uses nominal block sizes. Direct-genotype f4 with
 `allsnps=True` already uses per-statistic counts on a common SNP intersection.
-Raw-genotype f4 with `allsnps=False` uses the intersection shared by the
+Direct-genotype f4 with `allsnps=False` uses the intersection shared by the
 requested model. Cached pairwise f3/f4 instead defines a pairwise-available
 estimator and cannot reconstruct either common intersection.
 
