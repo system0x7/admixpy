@@ -34,6 +34,7 @@ from admixpy.fstats import (
     qpdstat,
     qpwave,
     qpwave_f4stats,
+    qpwave_multi,
     read_f2,
     stats_to_loo,
     write_f2,
@@ -634,7 +635,7 @@ class RawF4Tests(unittest.TestCase):
         self.assertTrue(np.isfinite(stats.variances).all())
         np.testing.assert_allclose(stats.se, full["se"])
 
-    def test_f2_backed_f4_diagonal_variance_matches_full_covariance(self):
+    def test_common_panel_direct_f4_diagonal_variance_matches_full_covariance(self):
         combos = pd.DataFrame(
             [
                 {"pop1": "A", "pop2": "B", "pop3": "C", "pop4": "D"},
@@ -677,6 +678,145 @@ class RawF4Tests(unittest.TestCase):
         self.assertTrue(np.isfinite(stats.variances).all())
         self.assertTrue(np.isfinite(stats.influence).all())
         np.testing.assert_allclose(stats.se, full["se"])
+
+    def test_raw_common_panel_f4_reports_count_and_matches_complete_f2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_complete_eigenstrat(Path(tmp))
+            raw = qpdstat(
+                pref,
+                "A",
+                "B",
+                "C",
+                "D",
+                allsnps=False,
+                poly_only=False,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            blocks = f2_from_geno(
+                pref,
+                pops=["A", "B"],
+                pops2=["C", "D"],
+                maxmiss=0,
+                poly_only=False,
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            cached = qpdstat(blocks, "A", "B", "C", "D", verbose=False)
+        self.assertEqual(raw.loc[0, "n"], 12)
+        self.assertNotIn("n", cached.columns)
+        self.assertAlmostEqual(raw.loc[0, "est"], cached.loc[0, "est"])
+        self.assertAlmostEqual(raw.loc[0, "se"], cached.loc[0, "se"])
+
+    def test_raw_common_panel_f4_matches_outgroup_weighted_f2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_complete_eigenstrat(Path(tmp))
+            raw = qpdstat(
+                pref,
+                "A",
+                "B",
+                "C",
+                "D",
+                allsnps=False,
+                poly_only=False,
+                outpop="C",
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            blocks = f2_from_geno(
+                pref,
+                pops=["A", "B"],
+                pops2=["C", "D"],
+                maxmiss=0,
+                poly_only=False,
+                outpop="C",
+                blgsize=0.04,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            cached = qpdstat(blocks, "A", "B", "C", "D", verbose=False)
+        self.assertEqual(raw.loc[0, "n"], 8)
+        self.assertAlmostEqual(raw.loc[0, "est"], cached.loc[0, "est"])
+        self.assertAlmostEqual(raw.loc[0, "se"], cached.loc[0, "se"])
+
+    def test_raw_f4_rejects_cache_only_afprod(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_complete_eigenstrat(Path(tmp))
+            with self.assertRaisesRegex(ValueError, "afprod=True is only available for precomputed f2 data"):
+                qpdstat(pref, "A", "B", "C", "D", afprod=True, verbose=False)
+
+    @staticmethod
+    def _write_model_missingness_eigenstrat(root: Path) -> Path:
+        pref = root / "models"
+        pref.with_suffix(".ind").write_text(
+            "A1 U A\nB1 U B\nC1 U C\nD1 U D\nE1 U E\n"
+        )
+        positions = [0.00, 0.01, 0.06, 0.07, 0.12, 0.13, 0.18, 0.19]
+        pref.with_suffix(".snp").write_text(
+            "".join(f"s{i} 1 {cm:.2f} {i * 100} A G\n" for i, cm in enumerate(positions, 1))
+        )
+        pref.with_suffix(".geno").write_text("02029\n" * 4 + "20200\n" * 4)
+        return pref
+
+    def test_model_column_scopes_common_panel_and_direct_model_cache(self):
+        combos = pd.DataFrame(
+            [
+                {"model": 1, "pop1": "A", "pop2": "B", "pop3": "C", "pop4": "D"},
+                {"model": 2, "pop1": "A", "pop2": "B", "pop3": "C", "pop4": "E"},
+            ]
+        )
+        models = pd.DataFrame(
+            [
+                {"left": ["A", "B"], "right": ["C", "D"]},
+                {"left": ["A", "B"], "right": ["C", "D", "E"]},
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_model_missingness_eigenstrat(Path(tmp))
+            out = qpdstat(
+                pref,
+                combos,
+                unique_only=False,
+                allsnps=False,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            cache = f4_model_cache(
+                pref,
+                models,
+                allsnps=False,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+            cached_duplicates = qpdstat(
+                cache,
+                pd.DataFrame(
+                    [
+                        {"model": 1, "pop1": "B", "pop2": "A", "pop3": "D", "pop4": "C"},
+                        {"model": 2, "pop1": "B", "pop2": "A", "pop3": "D", "pop4": "C"},
+                    ]
+                ),
+                unique_only=False,
+                verbose=False,
+            )
+            multi = qpwave_multi(
+                pref,
+                models,
+                ranks=[0],
+                allsnps=False,
+                adjust_pseudohaploid=False,
+                verbose=False,
+            )
+        self.assertEqual(out["model"].tolist(), [1, 2])
+        self.assertEqual(out["n"].tolist(), [8, 4])
+        self.assertIsInstance(cache, F4BlockCache)
+        self.assertFalse(cache.allsnps)
+        np.testing.assert_array_equal(cache.stats.snp_counts.sum(axis=1), [8, 4, 4])
+        self.assertEqual(cached_duplicates["n"].tolist(), [8, 4])
+        self.assertEqual(multi["model"].tolist(), [1, 2])
 
     def test_nominal_block_f4_diagonal_variance_matches_full_covariance(self):
         combos = pd.DataFrame(
@@ -1011,6 +1151,26 @@ class DirectF3Tests(unittest.TestCase):
         self.assertAlmostEqual(f3.loc[0, "se"], swapped.loc[0, "se"])
         self.assertAlmostEqual(f3.loc[0, "est"], repeated_f4.loc[0, "est"])
         self.assertAlmostEqual(f3.loc[0, "se"], repeated_f4.loc[0, "se"])
+
+    def test_direct_common_panel_f4_honors_minac2_modes_and_streaming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pref = self._write_singleton_source_eigenstrat(Path(tmp))
+            kwargs = {
+                "pop1": "A",
+                "pop2": "B",
+                "pop3": "C",
+                "pop4": "A",
+                "allsnps": False,
+                "minac2": 2,
+                "blgsize": 0.05,
+                "verbose": False,
+            }
+            materialized = qpdstat(pref, **kwargs)
+            streamed = qpdstat(pref, stream=True, chunk_size=3, **kwargs)
+            with self.assertRaisesRegex(ValueError, "No SNPs remain after filtering"):
+                qpdstat(pref, minac2=True, **{k: v for k, v in kwargs.items() if k != "minac2"})
+        self.assertGreater(materialized.loc[0, "n"], 0)
+        pd.testing.assert_frame_equal(streamed, materialized)
 
     def test_repeated_source_matches_corrected_f2_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

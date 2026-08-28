@@ -270,6 +270,33 @@ class F4BlockCache:
     allsnps: bool = False
 
 
+def _select_f4_block_cache_model(cache: F4BlockCache, model: int) -> F4BlockCache:
+    if "model" not in cache.stats.rows.columns:
+        return cache
+    take = np.flatnonzero(cache.stats.rows["model"].to_numpy() == model)
+    if take.size == 0:
+        raise ValueError(f"F4 cache does not contain model {model}")
+    source = cache.stats
+    stats = BlockStats(
+        rows=source.rows.iloc[take].reset_index(drop=True),
+        blocks=None if source.blocks is None else np.asarray(source.blocks)[take],
+        block_lengths=np.asarray(source.block_lengths, float).copy(),
+        stat=source.stat,
+        loo=None if source.loo is None else np.asarray(source.loo)[take],
+        est=None if source.est is None else np.asarray(source.est)[take],
+        cov=None if source.cov is None else np.asarray(source.cov)[np.ix_(take, take)],
+        variances=None if source.variances is None else np.asarray(source.variances)[take],
+    )
+    for name in ("influence", "contributes", "snp_counts"):
+        value = getattr(source, name, None)
+        if value is not None:
+            setattr(stats, name, np.asarray(value)[take])
+    if hasattr(source, "nominal_block_lengths"):
+        stats.nominal_block_lengths = np.asarray(source.nominal_block_lengths, float).copy()
+    models = None if cache.models is None else cache.models.iloc[[model - 1]].reset_index(drop=True)
+    return F4BlockCache(stats=stats, models=models, allsnps=cache.allsnps)
+
+
 @dataclass
 class QpAdmResult:
     target: str
@@ -887,7 +914,7 @@ def f4_model_cache(
         right_pops.extend(_as_pop_list(row.right))
     left_pops = list(dict.fromkeys(left_pops))
     right_pops = list(dict.fromkeys(right_pops))
-    if allsnps:
+    if _default_genotype_allsnps(data):
         combos = []
         for model_i, row in enumerate(models.itertuples(index=False), start=1):
             left = _model_left_with_target(row)
@@ -912,12 +939,12 @@ def f4_model_cache(
             data,
             pd.DataFrame(combos),
             unique_only=False,
-            allsnps=True,
+            allsnps=allsnps,
             resampling=resampling,
             verbose=verbose,
             **kwargs,
         )
-        return F4BlockCache(stats=stats, models=models, allsnps=True)
+        return F4BlockCache(stats=stats, models=models, allsnps=allsnps)
     _log(f"Loading reusable f2 cache for {len(left_pops) * len(right_pops)} population pairs", verbose)
     if resampling == "pairwise_counts":
         kwargs.setdefault("remove_na", False)
@@ -1695,7 +1722,8 @@ def _f4_combinations(pop1, pop2, pop3, pop4, comb: bool) -> pd.DataFrame:
         cols = ["pop1", "pop2", "pop3", "pop4"]
         if not all(c in pop1.columns for c in cols):
             raise ValueError("Population-combination data frame must have pop1, pop2, pop3, pop4 columns")
-        return pop1[cols].copy()
+        keep = cols + (["model"] if "model" in pop1.columns else [])
+        return pop1[keep].copy()
     p1, p2, p3, p4 = map(_as_list, (pop1, pop2, pop3, pop4))
     if p1 is None or p2 is None or p3 is None or p4 is None:
         raise ValueError("pop1, pop2, pop3, and pop4 are required for f4")
@@ -1907,7 +1935,9 @@ def f4_stats_from_geno(
     maxmiss: float | None = None,
     minmaf: float = 0,
     maxmaf: float = 0.5,
+    minac2: bool | int = False,
     outpop: str | None = None,
+    outpop_scale: bool = True,
     transitions: bool = True,
     transversions: bool = True,
     auto_only: bool = True,
@@ -1928,7 +1958,7 @@ def f4_stats_from_geno(
     if outpop is not None and outpop not in pops:
         pops.append(outpop)
     if maxmiss is None:
-        maxmiss = 1 if allsnps else 0
+        maxmiss = 1 if allsnps or "model" in popcombs.columns else 0
     if stream:
         return _f4_stats_from_geno_stream(
             pref,
@@ -1937,7 +1967,9 @@ def f4_stats_from_geno(
             maxmiss=maxmiss,
             minmaf=minmaf,
             maxmaf=maxmaf,
+            minac2=minac2,
             outpop=outpop,
+            outpop_scale=outpop_scale,
             transitions=transitions,
             transversions=transversions,
             auto_only=auto_only,
@@ -1966,6 +1998,7 @@ def f4_stats_from_geno(
         maxmiss=maxmiss,
         minmaf=minmaf,
         maxmaf=maxmaf,
+        minac2=minac2,
         outpop=outpop,
         transitions=transitions,
         transversions=transversions,
@@ -1973,12 +2006,17 @@ def f4_stats_from_geno(
         keepsnps=keepsnps,
         poly_only=False,
     )
+    snpwt = None
+    if outpop is not None and outpop_scale:
+        outgroup_af = afdat.afs[outpop].to_numpy(float)
+        snpwt = 1 / (outgroup_af * (1 - outgroup_af))
     return _f4_direct_blocks_from_afs(
         afdat,
         popcombs,
         blgsize=blgsize,
         allsnps=allsnps,
         poly_only=poly_only,
+        snpwt=snpwt,
         apply_corr=apply_corr,
         covariance=covariance,
         verbose=verbose,
@@ -2096,7 +2134,9 @@ def _f4_stats_from_geno_stream(
     maxmiss: float,
     minmaf: float,
     maxmaf: float,
+    minac2: bool | int,
     outpop: str | None,
+    outpop_scale: bool,
     transitions: bool,
     transversions: bool,
     auto_only: bool,
@@ -2117,6 +2157,23 @@ def _f4_stats_from_geno_stream(
     if outpop is not None and outpop not in pops:
         pops.append(outpop)
 
+    minac2_pops: list[str] | None = None
+    if minac2 == 2 and keepsnps is None:
+        max_counts = {pop: 0.0 for pop in pops}
+        for chunk in iter_geno_to_afs(
+            pref,
+            pops=pops,
+            format=format,
+            adjust_pseudohaploid=adjust_pseudohaploid,
+            chunk_size=chunk_size,
+            verbose=False,
+        ):
+            for pop in pops:
+                values = chunk.counts[pop].to_numpy(float)
+                if values.size:
+                    max_counts[pop] = max(max_counts[pop], float(np.nanmax(values)))
+        minac2_pops = [pop for pop, maximum in max_counts.items() if maximum > 1]
+
     keep_chunks: list[np.ndarray] = []
     retained_snp_parts: list[pd.DataFrame] = []
     _log("Filtering SNPs (streaming pass 1/2)", verbose)
@@ -2136,6 +2193,7 @@ def _f4_stats_from_geno_stream(
                 maxmiss=maxmiss,
                 minmaf=minmaf,
                 maxmaf=maxmaf,
+                minac2=False if minac2_pops is not None else minac2,
                 outpop=outpop,
                 transitions=transitions,
                 transversions=transversions,
@@ -2145,7 +2203,10 @@ def _f4_stats_from_geno_stream(
             )
             keep = np.zeros(len(chunk.snpfile), dtype=bool)
             keep[filtered.snpfile["_stream_row"].to_numpy(int)] = True
-            retained_snp_parts.append(chunk.snpfile.loc[keep].reset_index(drop=True))
+            if minac2_pops:
+                keep &= (chunk.counts[minac2_pops].to_numpy(float) > 1).all(axis=1)
+            if np.any(keep):
+                retained_snp_parts.append(chunk.snpfile.loc[keep].reset_index(drop=True))
         except ValueError as err:
             if str(err) != "No SNPs remain after filtering":
                 raise
@@ -2175,12 +2236,18 @@ def _f4_stats_from_geno_stream(
     singleton_warning = _SingletonWarningSummary("f4", apply_corr)
 
     def finish_block(parts: list[AfData], index: int) -> None:
+        block_afdat = _concat_afdata(parts)
+        snpwt = None
+        if outpop is not None and outpop_scale:
+            outgroup_af = block_afdat.afs[outpop].to_numpy(float)
+            snpwt = 1 / (outgroup_af * (1 - outgroup_af))
         block_stats = _f4_direct_blocks_from_afs(
-            _concat_afdata(parts),
+            block_afdat,
             combos,
             blgsize=float("inf"),
             allsnps=allsnps,
             poly_only=poly_only,
+            snpwt=snpwt,
             apply_corr=apply_corr,
             covariance=False,
             verbose=False,
@@ -2547,6 +2614,40 @@ def f3_stats_from_geno(
     )
 
 
+def _set_direct_resampling(
+    stats: BlockStats,
+    resampling: str,
+    *,
+    covariance: bool,
+) -> BlockStats:
+    if resampling == "pairwise_counts":
+        return stats
+    nominal_lengths = np.asarray(stats.nominal_block_lengths, float)
+    if stats.blocks is None:
+        raise ValueError("Direct nominal-block resampling requires retained block estimates")
+    loo = stats_to_loo(stats.blocks, nominal_lengths)
+    contributes = np.isfinite(stats.blocks)
+    stats.block_lengths = nominal_lengths
+    stats.loo = loo
+    if covariance:
+        stats.cov, stats.est = jackknife_cov(
+            loo,
+            nominal_lengths,
+            contributes=contributes,
+        )
+        stats.variances = None
+    else:
+        results = [
+            jack_vec_stats(loo[i, contributes[i]], nominal_lengths[contributes[i]])
+            for i in range(len(loo))
+        ]
+        stats.est = np.asarray([result[0] for result in results], float)
+        stats.variances = np.asarray([result[1] for result in results], float)
+        stats.cov = None
+    stats.snp_counts = None
+    return stats
+
+
 def f4_stats(
     data,
     pop1,
@@ -2567,16 +2668,22 @@ def f4_stats(
 ) -> BlockStats:
     resampling = _validate_resampling(resampling)
     kwargs = dict(kwargs)
-    if afprod and allsnps:
-        raise ValueError("afprod=True and allsnps=True together are not supported")
     combos = _f4_combinations(pop1, pop2, pop3, pop4, comb)
     if unique_only:
         combos = combos.drop_duplicates().reset_index(drop=True)
+    is_genotype = _default_genotype_allsnps(data)
     if allsnps and isinstance(data, F4BlockCache):
         raise ValueError(_ALLSNPS_DIRECT_ERROR)
     if isinstance(data, F4BlockCache):
         key = ["pop1", "pop2", "pop3", "pop4"]
         cached = data.stats
+        if "model" in combos.columns and "model" in cached.rows.columns:
+            key.append("model")
+        elif cached.rows.duplicated(key).any():
+            raise ValueError(
+                "F4 cache contains the same contrast under multiple model-specific "
+                "SNP panels; request contrasts with a model column"
+            )
         if covariance and cached.cov is None:
             raise ValueError(
                 "F4BlockCache does not contain a full covariance matrix; "
@@ -2626,18 +2733,27 @@ def f4_stats(
         if hasattr(cached, "influence") and hasattr(cached, "contributes"):
             stats.influence = np.asarray(cached.influence, float)[take]
             stats.contributes = np.asarray(cached.contributes, bool)[take]
+        if hasattr(cached, "snp_counts") and cached.snp_counts is not None:
+            stats.snp_counts = np.asarray(cached.snp_counts, float)[take]
+        if hasattr(cached, "nominal_block_lengths"):
+            stats.nominal_block_lengths = np.asarray(cached.nominal_block_lengths, float).copy()
         return stats
-    if allsnps:
-        if isinstance(data, (F2Blocks, F4ModelCache)) or (isinstance(data, (str, Path)) and Path(data).is_dir()):
-            raise ValueError(_ALLSNPS_DIRECT_ERROR)
+    if is_genotype:
+        if afprod:
+            raise ValueError(
+                "afprod=True is only available for precomputed f2 data; "
+                "raw genotype f4 uses the direct per-SNP estimator"
+            )
+        kwargs.pop("remove_na", None)
         stats = f4_stats_from_geno(
             data,
             combos,
-            allsnps=True,
+            allsnps=allsnps,
             verbose=verbose,
             covariance=covariance,
             **kwargs,
         )
+        stats = _set_direct_resampling(stats, resampling, covariance=covariance)
         if not keep_blocks:
             stats.blocks = None
         if not keep_loo:
@@ -2645,6 +2761,8 @@ def f4_stats(
         if not covariance:
             stats.cov = None
         return stats
+    if allsnps:
+        raise ValueError(_ALLSNPS_DIRECT_ERROR)
     if resampling == "pairwise_counts":
         kwargs.setdefault("remove_na", False)
     pops1 = list(dict.fromkeys(list(combos["pop1"]) + list(combos["pop2"])))
@@ -3007,8 +3125,13 @@ def qpwave_multi(
     for model_i, row in enumerate(models.itertuples(index=False), start=1):
         left = _model_left_with_target(row)
         right = _as_pop_list(row.right)
+        model_source = (
+            _select_f4_block_cache_model(source, model_i)
+            if isinstance(source, F4BlockCache)
+            else source
+        )
         out = qpwave(
-            source,
+            model_source,
             left=left,
             right=right,
             ranks=ranks,
@@ -3452,8 +3575,13 @@ def qpadm_multi(
     )
     rows = []
     for model_i, row in enumerate(models.itertuples(index=False), start=1):
+        model_source = (
+            _select_f4_block_cache_model(source, model_i)
+            if isinstance(source, F4BlockCache)
+            else source
+        )
         res = qpadm(
-            source,
+            model_source,
             target=row.target,
             left=_as_pop_list(row.left),
             right=_as_pop_list(row.right),
