@@ -2742,7 +2742,7 @@ def f4_stats(
         if afprod:
             raise ValueError(
                 "afprod=True is only available for precomputed f2 data; "
-                "raw genotype f4 uses the direct per-SNP estimator"
+                "direct genotype f4 uses the direct per-SNP estimator"
             )
         kwargs.pop("remove_na", None)
         stats = f4_stats_from_geno(
