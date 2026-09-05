@@ -2,7 +2,10 @@
 
 All notable changes to AdmixPy are documented in this file.
 
-## Unreleased
+## 1.0.6 - 2026-09-05
+
+This release includes the qpAdm validation, covariance, population-drop, and
+f-statistics performance improvements described below.
 
 ### Fixed
 
