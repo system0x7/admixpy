@@ -78,7 +78,7 @@ admixpy.qpwave(data, left, right, ranks=None, left_base=None,
 admixpy.qpadm(data, target, left=None, right=None, sources=None,
               fudge=0.0001, fudge_twice=False, iterations=20, getcov=True,
               return_f4=False, return_stats=False, return_cov=False,
-              verbose=True, **kwargs)
+              verbose=True, *, popdrop=True, **kwargs)
 ```
 
 `data` can be a supported genotype dataset prefix or precomputed f2 data.
@@ -109,6 +109,51 @@ datasets that do not fit comfortably in RAM, set `stream=True` to use two
 bounded-memory passes with 250,000 SNPs per chunk by default. The chunk size
 can be adjusted with `chunk_size`.
 
+qpAdm uses `qpadm(data, target, left, right)`; there is no separate positional
+outgroup argument. `sources` is an alias for `left`, so supply only one of them.
+Both population lists must contain unique names, and `left_base`, if supplied,
+must equal the target. Invalid population counts are rejected before genotype
+data is read.
+
+By default, qpAdm also fits every nonempty subset of the sources. This requires
+`2**len(left) - 1` subset fits. Use `popdrop=False` to skip this table while
+retaining the weights and rank tests; `result.popdrop` will be `None`.
+`qpadm_multi(..., full_results=False)` automatically skips subset fits and
+weight standard errors because it returns only the rank-test tables.
+
+Population-drop `chisq`, `p`, and weights use the covariance of each retained
+subset, inverted after applying that subset's regularization. They match
+independent fits using the same stored SNP panel and block layout, including
+`fudge_twice`; dropping a source does not recover additional SNPs.
+
+Nested comparisons include every one-source drop against the full model,
+followed by a feasible child with the smallest chi-square at each smaller size.
+`nested_parent` records the actual parent pattern. For these comparisons only,
+selected models are refitted using submatrices of the full model's regularized
+covariance. `nested_chisq` records those fit statistics, and `chisqdiff` and
+`p_nested` use their differences. Consequently, `chisqdiff` need not equal the
+difference between the standalone `chisq` entries. A materially negative
+difference from incomplete numerical convergence produces `p_nested=NaN`.
+These are nominal chi-square tests, without adjustment for model selection.
+The selected comparisons require at most `2*len(left) - 2` extra fits.
+
+For direct use of `qpadm_popdrop`, pass the original covariance as `cov=...`
+alongside `qinv` to obtain the same subset regularization as `qpadm`. Without
+`cov`, the inverse of the supplied `qinv` is treated as an already regularized
+covariance; a singular `qinv` requires the original covariance explicitly.
+
+For genotype batches, `f4_model_cache` retains block statistics and computes
+covariance only for the requested contrasts. Its `cache.stats.cov` is initially
+`None`; use `f4_stats(cache, ...)` or pass the cache to qpAdm/qpWave to obtain the
+required covariance. The cache records its resampling method in
+`cache.stats.resampling`. Requests using a different method raise an error;
+rebuild the cache with the desired `resampling` setting.
+
+Direct f4 automatically batches suitable contrasts into matrix products.
+Repeated-population bias corrections, target-heterozygosity normalization, and
+other unsupported combinations retain the general per-contrast calculation.
+Pair-count computation and TGENO decoding also use fewer temporary arrays.
+
 Lower-level helpers are also exported for direct use, including allele-frequency
 conversion (`anygeno_to_afs`, `eigenstrat_to_afs`, `plink_to_afs`,
 `packedancestrymap_to_afs`, `tgeno_to_afs`), f2 block IO and access
@@ -133,6 +178,13 @@ Direct-genotype f4 with `allsnps=False` uses the intersection shared by the
 requested model. Cached pairwise f3/f4 instead defines a pairwise-available
 estimator and cannot reconstruct either common intersection.
 
+Different missing-block patterns can produce a covariance matrix with negative
+eigenvalues under pairwise resampling. qpAdm and qpWave reject such matrices
+instead of returning an invalid chi-square statistic. Inspect population
+coverage and usable blocks; recomputing from genotype input with
+`allsnps=False` uses a common SNP panel. Tiny negative eigenvalues attributable
+to floating-point roundoff are tolerated.
+
 F2 cache creation and reading retain blocks with missing pair estimates by
 default (`remove_na=False`). Set `remove_na=True` to discard every block that
 is not finite (`NaN`) for all requested population pairs.
@@ -149,6 +201,10 @@ the finite but sampling-biased raw estimate; the Hudson FST denominator remains
 `(p1-p2)^2 + p1(1-p1) + p2(1-p2)` in either mode.
 
 Cache files without real per-pair SNP counts are rejected and must be rebuilt.
+
+With `minac2=2`, populations that never have two allele observations are exempt
+from the minimum-count filter. If all populations are exempt, other SNP filters
+still apply. `minac2=True` instead requires two observations in every population.
 
 Run an f4 statistic from a supported genotype dataset prefix:
 

@@ -31,6 +31,8 @@ from admixpy.fstats import (
     mats_to_f2arr,
     qp3pop,
     qpadm,
+    qpadm_fit,
+    qpadm_weights,
     qpdstat,
     qpwave,
     qpwave_f4stats,
@@ -1494,6 +1496,35 @@ class NominalMissingBlockTests(unittest.TestCase):
 
 
 class QpAdmValidationTests(unittest.TestCase):
+    def test_extra_positional_population_fails_before_reading_data(self):
+        with patch("admixpy.fstats.qpwave_f4stats") as compute:
+            with self.assertRaisesRegex(
+                ValueError,
+                r"Specify only one of left or sources.*qpadm\(data, target, left, right\)",
+            ):
+                qpadm("unused", "Chimp", "I41584_preQC", ["S1", "S2"], ["R0", "R1"])
+        compute.assert_not_called()
+
+    def test_conflicting_source_aliases_fail_before_reading_data(self):
+        with patch("admixpy.fstats.qpwave_f4stats") as compute:
+            with self.assertRaisesRegex(ValueError, "sources is an alias for left"):
+                qpadm("unused", "Target", left=["S1"], right=["R0", "R1"], sources=["S2"])
+        compute.assert_not_called()
+
+    def test_impossible_rank_has_explicit_error(self):
+        for fit in (qpadm_weights, qpadm_fit):
+            for shape, rank in (((12, 4), 11), ((2, 4), 3), ((2, 4), -1)):
+                with self.subTest(fit=fit.__name__, shape=shape, rank=rank):
+                    with self.assertRaisesRegex(ValueError, "qpAdm rank .* is incompatible with f4 matrix shape"):
+                        fit(np.zeros(shape), np.eye(np.prod(shape)), rank)
+
+    def test_valid_single_source_fit_is_unchanged(self):
+        fit = qpadm_fit(np.array([[0.1, 0.2]]), np.eye(2), rank=0)
+        np.testing.assert_array_equal(fit["weights"], [1.0])
+        np.testing.assert_array_equal(fit["fitted"], [[0.0, 0.0]])
+        self.assertAlmostEqual(fit["chisq"], 0.05)
+        self.assertEqual(fit["dof"], 2)
+
     def test_covariance_inverse_rejects_nonfinite_values_explicitly(self):
         with self.assertRaisesRegex(
             ValueError,

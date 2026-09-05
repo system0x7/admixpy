@@ -2,6 +2,34 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- Reject conflicting qpAdm source aliases, duplicate reference populations,
+  invalid source/reference counts, and a left base different from the target
+  before reading genotype data.
+- Reject indefinite qpAdm/qpWave covariance matrices before testing model fit.
+- Record f4 cache resampling methods and reject mismatched requests.
+- Handle `minac2=2` when every population has at most one allele observation.
+- Preserve explicit contrast bases in cached batch calculations.
+- Fit population-drop models by inverting each subset covariance, with
+  subset-specific regularization matching independent fits on the stored SNPs.
+- Compare genuine parent/child models for population-drop nested tests, using
+  one shared covariance treatment. Expose `nested_parent` and `nested_chisq`;
+  suppress p-values for materially negative chi-square differences.
+
+### Changed
+
+- Batch suitable direct f4 contrasts using matrix products, preserving the
+  general calculation for bias corrections and other unsupported cases.
+- Compute pair counts without SNP-by-population-by-population arrays and decode
+  packed TGENO bytes together, including unaligned SNP ranges.
+- Compute genotype-batch covariance only for requested contrasts. The full
+  batch cache initially has `stats.cov=None`.
+- Add `qpadm(..., popdrop=False)` to skip source-subset fits. Summary-only
+  `qpadm_multi` calls skip subset fits and weight covariance automatically.
+
 ## 1.0.4 - 2026-08-26
 
 ### Changed

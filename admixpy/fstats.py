@@ -173,6 +173,7 @@ class BlockStats:
     est: np.ndarray | None = None
     cov: np.ndarray | None = None
     variances: np.ndarray | None = None
+    resampling: str = "pairwise_counts"
 
     @property
     def se(self) -> np.ndarray:
@@ -268,6 +269,7 @@ class F4BlockCache:
     stats: BlockStats
     models: pd.DataFrame | None = None
     allsnps: bool = False
+    deferred_covariance: bool = False
 
 
 def _select_f4_block_cache_model(cache: F4BlockCache, model: int) -> F4BlockCache:
@@ -286,6 +288,7 @@ def _select_f4_block_cache_model(cache: F4BlockCache, model: int) -> F4BlockCach
         est=None if source.est is None else np.asarray(source.est)[take],
         cov=None if source.cov is None else np.asarray(source.cov)[np.ix_(take, take)],
         variances=None if source.variances is None else np.asarray(source.variances)[take],
+        resampling=source.resampling,
     )
     for name in ("influence", "contributes", "snp_counts"):
         value = getattr(source, name, None)
@@ -294,7 +297,10 @@ def _select_f4_block_cache_model(cache: F4BlockCache, model: int) -> F4BlockCach
     if hasattr(source, "nominal_block_lengths"):
         stats.nominal_block_lengths = np.asarray(source.nominal_block_lengths, float).copy()
     models = None if cache.models is None else cache.models.iloc[[model - 1]].reset_index(drop=True)
-    return F4BlockCache(stats=stats, models=models, allsnps=cache.allsnps)
+    return F4BlockCache(
+        stats=stats, models=models, allsnps=cache.allsnps,
+        deferred_covariance=cache.deferred_covariance,
+    )
 
 
 @dataclass
@@ -550,8 +556,7 @@ def mats_to_ctarr(afmat1, afmat2, block_lengths, verbose: bool = False) -> np.nd
     for b, n in enumerate(block_lengths):
         stop = start + int(n)
         _log_block("count", b, len(block_lengths), start, stop, verbose)
-        vals = _outer_pair(a1[start:stop], a2[start:stop])
-        out[:, :, b] = np.nanmean(vals, axis=2)
+        out[:, :, b] = (a1[start:stop].T @ a2[start:stop]) / int(n)
         start = stop
     return out
 
@@ -898,6 +903,8 @@ def f4_model_cache(
         )
     resampling = _validate_resampling(resampling)
     allsnps = bool(kwargs.pop("allsnps", False))
+    left_base = kwargs.pop("left_base", None)
+    right_base = kwargs.pop("right_base", None)
     if isinstance(data, F4ModelCache):
         if allsnps:
             raise ValueError(_ALLSNPS_DIRECT_ERROR)
@@ -905,6 +912,7 @@ def f4_model_cache(
     if isinstance(data, F4BlockCache):
         if allsnps:
             raise ValueError(_ALLSNPS_DIRECT_ERROR)
+        _validate_cache_resampling(data, resampling)
         return data
     models = _models_frame(models)
     left_pops = []
@@ -921,30 +929,34 @@ def f4_model_cache(
             right = _as_pop_list(row.right)
             if len(left) < 2 or len(right) < 2:
                 continue
-            left_base, row_pops = _contrast_pops(left, None, "left")
-            right_base, col_pops = _contrast_pops(right, None, "right")
+            model_left_base, row_pops = _contrast_pops(left, left_base, "left")
+            model_right_base, col_pops = _contrast_pops(right, right_base, "right")
             for row_pop in row_pops:
                 for col_pop in col_pops:
                     combos.append(
                         {
                             "model": model_i,
                             "pop1": row_pop,
-                            "pop2": left_base,
+                            "pop2": model_left_base,
                             "pop3": col_pop,
-                            "pop4": right_base,
+                            "pop4": model_right_base,
                         }
                     )
         _log(f"Loading reusable f4 cache for {len(combos)} population quadruples", verbose)
+        # Keep the block information needed to form covariance on demand.
+        # Avoid the dense covariance between every contrast in every model.
+        kwargs["keep_loo"] = True
         stats = f4_stats(
             data,
             pd.DataFrame(combos),
             unique_only=False,
             allsnps=allsnps,
             resampling=resampling,
+            covariance=False,
             verbose=verbose,
             **kwargs,
         )
-        return F4BlockCache(stats=stats, models=models, allsnps=allsnps)
+        return F4BlockCache(stats=stats, models=models, allsnps=allsnps, deferred_covariance=True)
     _log(f"Loading reusable f2 cache for {len(left_pops) * len(right_pops)} population pairs", verbose)
     if resampling == "pairwise_counts":
         kwargs.setdefault("remove_na", False)
@@ -1753,6 +1765,39 @@ def _examples_heading(label: str, count: int, limit: int = 4) -> str:
     return f"{label}:"
 
 
+def _f4_matmul_groups(idx: np.ndarray, models: np.ndarray, eligible: np.ndarray):
+    """Plan small Cartesian products of allele-frequency differences.
+
+    Sparse, arbitrary quadruple lists retain the per-contrast path so that
+    batching cannot create a much larger matrix than the requested output.
+    """
+    groups = []
+    for model in pd.unique(models):
+        take = np.flatnonzero((models == model) & eligible)
+        if len(take) < 4:
+            continue
+        left, left_i = np.unique(idx[take, :2], axis=0, return_inverse=True)
+        right, right_i = np.unique(idx[take, 2:], axis=0, return_inverse=True)
+        if len(left) * len(right) <= 2 * len(take):
+            groups.append((model, take, left, right, left_i, right_i))
+    return groups
+
+
+def _f4_matmul_block(block, left, right, left_i, right_i, snpwt=None):
+    a = block[:, left[:, 0]] - block[:, left[:, 1]]
+    b = block[:, right[:, 0]] - block[:, right[:, 1]]
+    valid_a, valid_b = np.isfinite(a), np.isfinite(b)
+    counts = valid_a.astype(float).T @ valid_b.astype(float)
+    a, b = np.where(valid_a, a, 0.0), np.where(valid_b, b, 0.0)
+    if snpwt is not None:
+        a *= snpwt[:, None]
+    sums = a.T @ b
+    counts = counts[left_i, right_i]
+    estimates = np.full(len(left_i), np.nan)
+    np.divide(sums[left_i, right_i], counts, out=estimates, where=counts > 0)
+    return estimates, counts
+
+
 def _f4_direct_blocks_from_afs(
     afdat: AfData,
     combos: pd.DataFrame,
@@ -1841,6 +1886,19 @@ def _f4_direct_blocks_from_afs(
                 use &= (np.nanmax(vals, axis=1) > 0) & (np.nanmin(vals, axis=1) < 1)
             use_by_model[model] = use
 
+    groups = []
+    if (
+        not normalize_by_target_het
+        and not (allsnps and poly_only)
+        and (snpwt is None or np.isfinite(snpwt).all())
+    ):
+        eligible = ~np.any(correction_coefficients != 0, axis=1)
+        groups = _f4_matmul_groups(idx, model_values, eligible)
+    scalar_stats = np.ones(nstats, dtype=bool)
+    for _, take, *_ in groups:
+        scalar_stats[take] = False
+    scalar_indices = np.flatnonzero(scalar_stats)
+
     start = 0
     for b, n in enumerate(block_lengths):
         stop = start + int(n)
@@ -1848,7 +1906,14 @@ def _f4_direct_blocks_from_afs(
         block = arr[start:stop]
         count_block = count_arr[start:stop]
         block_snpwt = None if snpwt is None else snpwt[start:stop]
-        for stat_i, p in enumerate(idx):
+        for model, take, left, right, left_i, right_i in groups:
+            use = slice(None) if allsnps else use_by_model[model][start:stop]
+            weights = None if block_snpwt is None else block_snpwt[use]
+            out[take, b], snp_counts[take, b] = _f4_matmul_block(
+                block[use], left, right, left_i, right_i, weights,
+            )
+        for stat_i in scalar_indices:
+            p = idx[stat_i]
             vals = block[:, p]
             use = (
                 np.isfinite(vals).all(axis=1)
@@ -2620,6 +2685,7 @@ def _set_direct_resampling(
     *,
     covariance: bool,
 ) -> BlockStats:
+    stats.resampling = resampling
     if resampling == "pairwise_counts":
         return stats
     nominal_lengths = np.asarray(stats.nominal_block_lengths, float)
@@ -2645,7 +2711,18 @@ def _set_direct_resampling(
         stats.variances = np.asarray([result[1] for result in results], float)
         stats.cov = None
     stats.snp_counts = None
+    stats.influence = None
+    stats.contributes = contributes
     return stats
+
+
+def _validate_cache_resampling(cache: F4BlockCache, resampling: str) -> None:
+    if cache.stats.resampling != resampling:
+        raise ValueError(
+            f"F4 cache uses resampling={cache.stats.resampling!r}, but "
+            f"resampling={resampling!r} was requested; rebuild the cache "
+            "with the requested resampling method."
+        )
 
 
 def f4_stats(
@@ -2675,6 +2752,7 @@ def f4_stats(
     if allsnps and isinstance(data, F4BlockCache):
         raise ValueError(_ALLSNPS_DIRECT_ERROR)
     if isinstance(data, F4BlockCache):
+        _validate_cache_resampling(data, resampling)
         key = ["pop1", "pop2", "pop3", "pop4"]
         cached = data.stats
         if "model" in combos.columns and "model" in cached.rows.columns:
@@ -2684,7 +2762,7 @@ def f4_stats(
                 "F4 cache contains the same contrast under multiple model-specific "
                 "SNP panels; request contrasts with a model column"
             )
-        if covariance and cached.cov is None:
+        if covariance and cached.cov is None and not data.deferred_covariance:
             raise ValueError(
                 "F4BlockCache does not contain a full covariance matrix; "
                 "rebuild the cache with covariance=True"
@@ -2713,6 +2791,14 @@ def f4_stats(
         loo = cached.loo[take] if cached.loo is not None and keep_loo else None
         est = cached.est[take] if cached.est is not None else None
         cov = cached.cov[np.ix_(take, take)] if covariance and cached.cov is not None else None
+        if covariance and cov is None and data.deferred_covariance:
+            if resampling == "pairwise_counts":
+                cov = _influence_covariance(cached.influence[take], cached.contributes[take])
+            else:
+                cov, _ = jackknife_cov(
+                    cached.loo[take], cached.block_lengths,
+                    est=est, contributes=cached.contributes[take],
+                )
         variances = (
             np.asarray(cached.variances, float)[take]
             if cached.variances is not None
@@ -2729,10 +2815,12 @@ def f4_stats(
             est=est,
             cov=cov,
             variances=variances,
+            resampling=resampling,
         )
-        if hasattr(cached, "influence") and hasattr(cached, "contributes"):
-            stats.influence = np.asarray(cached.influence, float)[take]
-            stats.contributes = np.asarray(cached.contributes, bool)[take]
+        for name in ("influence", "contributes"):
+            value = getattr(cached, name, None)
+            if value is not None:
+                setattr(stats, name, np.asarray(value)[take])
         if hasattr(cached, "snp_counts") and cached.snp_counts is not None:
             stats.snp_counts = np.asarray(cached.snp_counts, float)[take]
         if hasattr(cached, "nominal_block_lengths"):
@@ -2817,6 +2905,7 @@ def f4_stats(
         loo=stat_loo if keep_loo else None,
         est=est,
         cov=cov if covariance else None,
+        resampling=resampling,
     )
     if resampling == "pairwise_counts":
         stats.influence = influence
@@ -2920,6 +3009,7 @@ def f4(
 
 def _contrast_pops(pops: Sequence[str], base: str | None, name: str) -> tuple[str, list[str]]:
     pops = list(pops)
+    _require_unique_pops(pops, name)
     if len(pops) < 2:
         raise ValueError(f"{name} must contain at least two populations")
     base = pops[0] if base is None else base
@@ -3033,6 +3123,7 @@ def qpwave_ranktest(
     if rank >= min(mat.shape):
         raise ValueError("rank must be smaller than min(number of left contrasts, number of right contrasts)")
     cov = np.asarray(qpw.cov, float)
+    _validate_covariance_psd(cov, "qpWave")
     if diag:
         cov = cov + np.eye(cov.shape[0]) * diag
     resid0 = mat.reshape(-1)
@@ -3109,6 +3200,8 @@ def qpwave_multi(
         f4_model_cache(
             data,
             models,
+            left_base=left_base,
+            right_base=right_base,
             resampling=resampling,
             verbose=verbose,
             **kwargs,
@@ -3185,6 +3278,15 @@ def qpadm_weights(
     iterations: int = 20,
 ) -> dict:
     xmat = np.asarray(xmat, float)
+    if xmat.ndim != 2:
+        raise ValueError("qpAdm requires a two-dimensional f4 matrix")
+    if rank < 0 or rank > min(xmat.shape):
+        raise ValueError(
+            f"qpAdm rank {rank} is incompatible with f4 matrix shape {xmat.shape}; "
+            f"rank must be between 0 and {min(xmat.shape)}. "
+            "Check the number of source/left and right/reference populations "
+            "and the argument order: qpadm(data, target, left, right)."
+        )
     if rank == 0:
         return {"weights": np.ones(1), "A": np.zeros((xmat.shape[0], 0)), "B": np.zeros((0, xmat.shape[1]))}
     _, _, vt = np.linalg.svd(xmat, full_matrices=False)
@@ -3210,10 +3312,7 @@ def _qpadm_dof(nrow: int, ncol: int, rank: int) -> int:
 
 def qpadm_fit(xmat: np.ndarray, qinv: np.ndarray, rank: int, fudge: float = 0.0001, iterations: int = 20) -> dict:
     xmat = np.asarray(xmat, float)
-    if rank == 0:
-        fit = {"weights": np.ones(1), "A": np.zeros((xmat.shape[0], 0)), "B": np.zeros((0, xmat.shape[1]))}
-    else:
-        fit = qpadm_weights(xmat, qinv, rank, fudge=fudge, iterations=iterations)
+    fit = qpadm_weights(xmat, qinv, rank, fudge=fudge, iterations=iterations)
     fitted = fit["A"] @ fit["B"]
     resid = (xmat - fitted).reshape(-1)
     chisq = float(resid @ qinv @ resid)
@@ -3248,17 +3347,55 @@ def qpadm_popdrop(
     sources: Sequence[str],
     fudge: float = 0.0001,
     iterations: int = 20,
+    *,
+    cov: np.ndarray | None = None,
+    fudge_twice: bool = False,
 ) -> pd.DataFrame:
+    """Fit source subsets on the existing SNP panel.
+
+    With raw ``cov``, each subset uses its own regularization, matching an
+    independent qpAdm fit. Nested comparisons use the full model's regularized
+    covariance for both models. If only ``qinv`` is supplied, its inverse is
+    treated as an already regularized covariance and is not regularized again.
+    """
+    xmat, qinv = np.asarray(xmat, float), np.asarray(qinv, float)
     sources = list(sources)
     nsrc = len(sources)
+    _require_unique_pops(sources, "left")
+    if xmat.ndim != 2 or len(xmat) != nsrc or not nsrc:
+        raise ValueError("qpadm_popdrop requires one f4 matrix row per source")
+    expected_shape = (xmat.size, xmat.size)
+    if qinv.shape != expected_shape:
+        raise ValueError(f"qpadm_popdrop expected qinv shape {expected_shape}, received {qinv.shape}")
+    if cov is None:
+        if not np.isfinite(qinv).all():
+            raise ValueError("qpadm_popdrop qinv must contain only finite values")
+        _validate_covariance_psd(qinv)
+        try:
+            common_cov = linalg.inv(qinv)
+        except linalg.LinAlgError:
+            raise ValueError("qpadm_popdrop requires raw cov when qinv is singular") from None
+    else:
+        cov = np.asarray(cov, float)
+        if cov.shape != expected_shape:
+            raise ValueError(f"qpadm_popdrop expected cov shape {expected_shape}, received {cov.shape}")
+        # Raw covariance is authoritative, including its regularization.
+        qinv = _qinv_from_cov(cov, fudge, fudge_twice)
+        common_cov = _regularize_covariance(cov, fudge, fudge_twice)
     ncol = xmat.shape[1]
     rows = []
+    subsets = []
     for nkeep in range(nsrc, 0, -1):
         for keep_tuple in combinations(range(nsrc), nkeep):
             keep = list(keep_tuple)
             flat = np.concatenate([np.arange(i * ncol, (i + 1) * ncol) for i in keep])
             submat = xmat[keep, :]
-            subqinv = qinv[np.ix_(flat, flat)]
+            if nkeep == nsrc:
+                subqinv = qinv
+            elif cov is None:
+                subqinv = _qinv_from_cov(common_cov[np.ix_(flat, flat)], fudge=0)
+            else:
+                subqinv = _qinv_from_cov(cov[np.ix_(flat, flat)], fudge, fudge_twice)
             rank = len(keep) - 1
             fit = qpadm_fit(submat, subqinv, rank, fudge=fudge, iterations=iterations)
             weights = np.full(nsrc, np.nan)
@@ -3278,11 +3415,43 @@ def qpadm_popdrop(
             for src, weight in zip(sources, weights):
                 row[src] = weight
             rows.append(row)
+            subsets.append((keep, flat))
     out = pd.DataFrame(rows)
     if out.empty:
         return out
-    best, dofdiff, chisqdiff, p_nested = _popdrop_nested_chain(out, nsrc)
+    best, parents = _popdrop_nested_parents(out, nsrc)
+    nested_chisq = np.full(len(out), np.nan)
+    for i in np.flatnonzero(best):
+        keep, flat = subsets[i]
+        if len(keep) == nsrc or cov is None or fudge == 0:
+            nested_chisq[i] = out.iloc[i]["chisq"]
+        else:
+            shared_qinv = _qinv_from_cov(common_cov[np.ix_(flat, flat)], fudge=0)
+            nested_fit = qpadm_fit(
+                xmat[keep], shared_qinv, len(keep) - 1,
+                fudge=fudge, iterations=iterations,
+            )
+            nested_chisq[i] = nested_fit["chisq"]
+    dofdiff = np.full(len(out), np.nan)
+    chisqdiff = np.full(len(out), np.nan)
+    p_nested = np.full(len(out), np.nan)
+    parent_patterns = [None] * len(out)
+    for child, parent in enumerate(parents):
+        if parent < 0:
+            continue
+        parent_patterns[child] = out.iloc[parent]["pat"]
+        dd = out.iloc[child]["dof"] - out.iloc[parent]["dof"]
+        cd = nested_chisq[child] - nested_chisq[parent]
+        # Finite iteration fits can fail to be monotonic. Do not report a
+        # negative likelihood-ratio statistic as a passing nested test.
+        tol = 1e-10 * max(1.0, abs(nested_chisq[child]), abs(nested_chisq[parent]))
+        if np.isfinite(cd) and cd >= -tol and dd > 0:
+            cd = max(0.0, cd)
+            p_nested[child] = _chi2_sf(cd, int(dd))
+        dofdiff[child], chisqdiff[child] = dd, cd
     out["best"] = best
+    out["nested_parent"] = parent_patterns
+    out["nested_chisq"] = nested_chisq
     out["dofdiff"] = dofdiff
     out["chisqdiff"] = chisqdiff
     out["p_nested"] = p_nested
@@ -3290,61 +3459,73 @@ def qpadm_popdrop(
     return out.sort_values(["dof", "pat"]).reset_index(drop=True)
 
 
-def _popdrop_nested_chain(out: pd.DataFrame, nsources: int):
-    # Start with every model that drops exactly one source. For each model size
-    # that drops additional sources, add the feasible model with the smallest
-    # chi-square among those obtainable by dropping one more source from a
-    # model already selected. Compute nested differences along this chain.
+def _popdrop_nested_parents(out: pd.DataFrame, nsources: int):
+    # Compare every one-source drop to the full model. At each smaller size,
+    # select the feasible child with lowest chi-square and a genuine selected
+    # parent. Resolve ties by pattern rather than input row order.
     n = len(out)
     best = np.zeros(n, dtype=bool)
-    dofdiff = np.full(n, np.nan)
-    chisqdiff = np.full(n, np.nan)
-    p_nested = np.full(n, np.nan)
-    rnk = nsources - 1
-    if rnk < 1:
-        return best, dofdiff, chisqdiff, p_nested
-
-    f4rank_arr = out["f4rank"].to_numpy()
+    parents = np.full(n, -1, dtype=int)
     pat_arr = out["pat"].to_numpy()
     feasible_arr = out["feasible"].to_numpy()
     chisq_arr = out["chisq"].to_numpy()
-    dof_arr = out["dof"].to_numpy()
-
-    seed_idx = np.where(f4rank_arr == rnk - 1)[0]
-    if seed_idx.size == 0:
-        return best, dofdiff, chisqdiff, p_nested
-    best[seed_idx] = True
-    chain_idx = list(seed_idx)
-    chain_pats = set(pat_arr[seed_idx])
-
-    def child_patterns(pat: str) -> list[str]:
-        return [pat[:k] + "1" + pat[k + 1 :] for k, c in enumerate(pat) if c == "0"]
-
-    for level in range(rnk - 2, 0, -1):
-        children: set[str] = set()
-        for p in chain_pats:
-            children.update(child_patterns(p))
-        if not children:
+    index = {pat: i for i, pat in enumerate(pat_arr)}
+    full = index.get("0" * nsources)
+    if full is None or not np.isfinite(chisq_arr[full]):
+        return best, parents
+    best[full] = True
+    previous = [full]
+    for ndrop in range(1, nsources):
+        candidates: dict[int, list[int]] = {}
+        for parent in previous:
+            pat = pat_arr[parent]
+            for k, bit in enumerate(pat):
+                if bit != "0":
+                    continue
+                child = index.get(pat[:k] + "1" + pat[k + 1:])
+                if child is not None and np.isfinite(chisq_arr[child]):
+                    if ndrop == 1 or feasible_arr[child]:
+                        candidates.setdefault(child, []).append(parent)
+        if not candidates:
             break
-        mask = (f4rank_arr == level) & np.isin(pat_arr, list(children)) & feasible_arr
-        if not mask.any():
-            continue
-        cand_idx = np.where(mask)[0]
-        winner = cand_idx[int(np.nanargmin(chisq_arr[cand_idx]))]
-        best[winner] = True
-        chain_idx.append(winner)
-        chain_pats.add(pat_arr[winner])
+        key = lambda i: (chisq_arr[i], pat_arr[i])
+        chosen = list(candidates) if ndrop == 1 else [min(candidates, key=key)]
+        for child in chosen:
+            best[child] = True
+            parents[child] = min(candidates[child], key=key)
+        previous = chosen
+    return best, parents
 
-    chain_sorted = sorted(chain_idx, key=lambda i: -dof_arr[i])
-    for k in range(len(chain_sorted) - 1):
-        i, j = chain_sorted[k], chain_sorted[k + 1]
-        dd = dof_arr[i] - dof_arr[j]
-        cd = chisq_arr[i] - chisq_arr[j]
-        dofdiff[i] = dd
-        chisqdiff[i] = cd
-        if np.isfinite(cd) and np.isfinite(dd) and dd > 0:
-            p_nested[i] = _chi2_sf(cd, int(dd))
-    return best, dofdiff, chisqdiff, p_nested
+
+def _validate_covariance_psd(cov: np.ndarray, caller: str = "qpAdm") -> None:
+    """Reject indefinite covariance, allowing eigensolver roundoff at zero."""
+    if not cov.size:
+        return
+    scale = float(np.linalg.norm(cov, ord=np.inf))
+    tolerance = 100 * np.finfo(float).eps * len(cov) * scale
+    if not np.allclose(cov, cov.T, rtol=0, atol=tolerance):
+        raise ValueError(f"{caller} covariance matrix must be symmetric")
+    try:
+        linalg.cholesky(cov, check_finite=False)
+        return
+    except linalg.LinAlgError:
+        smallest = float(linalg.eigvalsh(cov, subset_by_index=[0, 0], check_finite=False)[0])
+    if smallest < -tolerance:
+        raise ValueError(
+            f"{caller} covariance matrix is not positive semidefinite "
+            f"(minimum eigenvalue {smallest:.6g}); cannot compute a valid chi-square test. "
+            "Different missing-block patterns can cause this with pairwise resampling. "
+            "Inspect population coverage and usable blocks, or recompute from genotype "
+            "input with allsnps=False to use a common SNP panel."
+        )
+
+
+def _regularize_covariance(cov: np.ndarray, fudge: float, fudge_twice: bool = False) -> np.ndarray:
+    cov = np.asarray(cov, float).copy()
+    cov[np.diag_indices_from(cov)] += fudge * np.trace(cov)
+    if fudge_twice:
+        cov[np.diag_indices_from(cov)] += fudge * np.trace(cov)
+    return cov
 
 
 def _qinv_from_cov(cov: np.ndarray, fudge: float, fudge_twice: bool = False) -> np.ndarray:
@@ -3358,9 +3539,8 @@ def _qinv_from_cov(cov: np.ndarray, fudge: float, fudge_twice: bool = False) -> 
             f"Covariance matrix contains {nonfinite} non-finite {suffix}; "
             "cannot compute its inverse"
         )
-    cov[np.diag_indices_from(cov)] += fudge * np.trace(cov)
-    if fudge_twice:
-        cov[np.diag_indices_from(cov)] += fudge * np.trace(cov)
+    _validate_covariance_psd(cov)
+    cov = _regularize_covariance(cov, fudge, fudge_twice)
     try:
         return linalg.inv(cov)
     except linalg.LinAlgError:
@@ -3387,6 +3567,7 @@ def _validate_f4_inputs(
     bad_est = ~np.isfinite(estimates)
     bad_cov = ~np.isfinite(cov)
     if not np.any(bad_est) and not np.any(bad_cov):
+        _validate_covariance_psd(cov, caller)
         return
 
     affected = bad_est.copy()
@@ -3469,6 +3650,29 @@ def _weights_covariance(qpw: QpWaveStats, qinv: np.ndarray, rank: int, fudge: fl
     return np.cov(wmat * scale, rowvar=False)
 
 
+def _validate_qpadm_populations(target, sources, right, left_base=None, right_base=None):
+    if not isinstance(target, str):
+        raise TypeError("target must be a population name string; positional qpadm order is qpadm(data, target, left, right)")
+    _require_unique_pops(sources, "left")
+    _require_unique_pops(right, "right")
+    if not sources:
+        raise ValueError("At least one source/left population is required")
+    if len(right) < 2:
+        raise ValueError("At least two right/reference populations are required")
+    if target in sources:
+        raise ValueError(f"target {target!r} should not also appear among source/left populations")
+    if left_base is not None and left_base != target:
+        raise ValueError("qpAdm left_base must be the target population; changing it changes the meaning of the source weights")
+    if right_base is not None and right_base not in right:
+        raise ValueError("right_base must be included in right")
+    if len(sources) > len(right):
+        raise ValueError(
+            f"qpAdm has {len(sources)} source/left populations but only {len(right)} "
+            "right/reference populations; the requested rank exceeds the number "
+            "of right contrasts. Add right populations or reduce the sources."
+        )
+
+
 def qpadm(
     data,
     target: str,
@@ -3483,23 +3687,23 @@ def qpadm(
     return_stats: bool = False,
     return_cov: bool = False,
     verbose: bool = True,
+    *,
+    popdrop: bool = True,
     **kwargs,
 ) -> QpAdmResult:
     if not isinstance(target, str):
         raise TypeError("target must be a population name string; positional qpadm order is qpadm(data, target, left, right)")
+    if left is not None and sources is not None:
+        raise ValueError(
+            "Specify only one of left or sources; sources is an alias for left. "
+            "The positional qpadm order is qpadm(data, target, left, right); "
+            "there is no separate positional outgroup argument."
+        )
     sources = _as_pop_list(left if sources is None else sources)
     if right is None:
         raise ValueError("right populations are required")
     right = _as_pop_list(right)
-    _require_unique_pops(sources, "left")
-    if len(sources) < 1:
-        raise ValueError("At least one source/left population is required")
-    if len(right) < 1:
-        raise ValueError("At least one right/reference population is required")
-    if target in sources:
-        raise ValueError(
-            f"target {target!r} should not also appear among source/left populations"
-        )
+    _validate_qpadm_populations(target, sources, right, kwargs.get("left_base"), kwargs.get("right_base"))
     if "allsnps" not in kwargs:
         kwargs["allsnps"] = _default_genotype_allsnps(data)
     left_full = [target] + [p for p in sources if p != target]
@@ -3518,7 +3722,10 @@ def qpadm(
     weights = pd.DataFrame({"target": target, "left": sources, "weight": fit["weights"], "se": se})
     weights["z"] = weights["weight"] / weights["se"]
     rankdrop = qpadm_rankdrop(xmat, qinv, fudge=fudge, iterations=iterations)
-    popdrop = qpadm_popdrop(xmat, qinv, sources, fudge=fudge, iterations=iterations)
+    popdrop_result = qpadm_popdrop(
+        xmat, qinv, sources, fudge=fudge, iterations=iterations,
+        cov=qpw.cov, fudge_twice=fudge_twice,
+    ) if popdrop else None
     f4 = None
     qpw_out = qpw if return_stats else None
     weight_cov = wcov if return_cov else None
@@ -3533,7 +3740,7 @@ def qpadm(
         right=list(right),
         weights=weights,
         rankdrop=rankdrop,
-        popdrop=popdrop,
+        popdrop=popdrop_result,
         f4=f4,
         qpwave=qpw_out,
         weight_cov=weight_cov,
@@ -3553,23 +3760,29 @@ def qpadm_multi(
         raise ValueError("models must contain a 'target' column for qpadm_multi")
     for model_i, row in enumerate(models.itertuples(index=False), start=1):
         try:
-            _require_unique_pops(_as_pop_list(row.left), "left")
-        except ValueError as err:
+            _validate_qpadm_populations(
+                row.target, _as_pop_list(row.left), _as_pop_list(row.right),
+                kwargs.get("left_base"), kwargs.get("right_base"),
+            )
+        except (ValueError, TypeError) as err:
             raise ValueError(f"Model {model_i}: {err}") from None
     if models.empty:
         return pd.DataFrame()
-    qpadm_keys = {"fudge", "fudge_twice", "iterations", "getcov", "return_f4", "return_stats", "return_cov"}
+    qpadm_keys = {"fudge", "fudge_twice", "iterations", "getcov", "return_f4", "return_stats", "return_cov", "popdrop"}
     if "allsnps" not in kwargs:
         kwargs["allsnps"] = _default_genotype_allsnps(data)
     resampling = _validate_resampling(kwargs.pop("resampling", "pairwise_counts"))
     qpadm_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in qpadm_keys}
+    if not full_results:
+        qpadm_kwargs.update(getcov=False, popdrop=False, return_f4=False, return_stats=False, return_cov=False)
     source = (
         f4_model_cache(data, models, resampling=resampling, verbose=verbose, **kwargs)
         if use_cache
         else data
     )
     qp_kwargs = (
-        {**qpadm_kwargs, "resampling": resampling}
+        {**qpadm_kwargs, "resampling": resampling,
+         **{key: kwargs[key] for key in ("left_base", "right_base") if key in kwargs}}
         if use_cache
         else {**kwargs, **qpadm_kwargs, "resampling": resampling}
     )

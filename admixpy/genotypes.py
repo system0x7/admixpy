@@ -442,17 +442,15 @@ def _read_tgeno(
     else:
         sample_indices = np.asarray(sample_indices, dtype=np.int64)
     out = np.empty((last - first + 1, len(sample_indices)), dtype=float)
-    snp_indices = np.arange(first - 1, last, dtype=np.int64)
-    byte_min = int(snp_indices[0]) // 4
-    byte_max = int(snp_indices[-1]) // 4
+    byte_min = (first - 1) // 4
+    byte_max = (last - 1) // 4
     slice_len = byte_max - byte_min + 1
-    local_byte_idx = (snp_indices // 4) - byte_min
-    offsets = snp_indices % 4
+    offset = (first - 1) % 4
     with open(path, "rb") as fh:
         for col, sample_i in enumerate(sample_indices):
             fh.seek(header_len + sample_i * bytes_per_ind + byte_min)
             raw = np.frombuffer(fh.read(slice_len), dtype=np.uint8)
-            vals = _PACKED_ANCESTRYMAP_LUT[raw[local_byte_idx], offsets]
+            vals = _PACKED_ANCESTRYMAP_LUT[raw].reshape(-1)[offset:offset + len(out)]
             out[:, col] = vals
     out[out == 3] = np.nan
     return out
@@ -539,8 +537,6 @@ def tgeno_to_afs(
             counts[start - 1:stop, :] = c
     else:
         header_len, bytes_per_ind = _tgeno_layout(geno_path, nsnp, len(ind))
-        snp_byte_idx = (np.arange(nsnp, dtype=np.int64) // 4)
-        snp_off = (np.arange(nsnp, dtype=np.int64) % 4)
         alt_sum = np.zeros((nsnp, npop), dtype=float)
         nkept = len(keep_inds)
         log_step = max(1, nkept // 20)
@@ -551,7 +547,7 @@ def tgeno_to_afs(
                     print(f"\rReading TGENO sample {col + 1}/{nkept}      ", end=end, flush=True)
                 fh.seek(header_len + int(sample_i) * bytes_per_ind)
                 raw = np.frombuffer(fh.read(bytes_per_ind), dtype=np.uint8)
-                vals = _PACKED_ANCESTRYMAP_LUT[raw[snp_byte_idx], snp_off].astype(float)
+                vals = _PACKED_ANCESTRYMAP_LUT[raw].reshape(-1)[:nsnp].astype(float)
                 vals[vals == 3] = np.nan
                 p = ploidy[col]
                 pop_i = indvec_sub[col]
@@ -809,7 +805,10 @@ def discard_from_aftable(
             popmask = np.ones(cm.shape[1], dtype=bool)
             if minac2 == 2:
                 popmask = np.nanmax(cm, axis=0) > 1
-            minac = np.nanmin(cm[:, popmask], axis=1)
+            # Mode 2 exempts populations that never have two observations.
+            # If all populations are exempt, there is no count restriction.
+            if np.any(popmask):
+                minac = np.nanmin(cm[:, popmask], axis=1)
         poly = is_polymorphic(afs) if poly_only else np.ones(len(snp), dtype=bool)
         outgroupaf = afs[outpop].to_numpy(float) if outpop is not None else np.full(len(snp), 0.5)
         chrom = pd.to_numeric(snp["CHR"], errors="coerce")
