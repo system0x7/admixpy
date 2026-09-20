@@ -2,6 +2,13 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.0.7 - 2026-09-20
+
+### Added
+
+- Add `f4_ratio` with batch support, block-jackknife uncertainty, and
+  denominator diagnostics.
+
 ## 1.0.6 - 2026-09-05
 
 This release includes the qpAdm validation, covariance, population-drop, and

@@ -260,6 +260,35 @@ popdrop:
  ...
 ```
 
+## f4-ratio ancestry estimates
+
+`f4_ratio` estimates the contribution of `source1` to `target` in an assumed
+two-source model:
+
+```text
+f4(target, source2; reference, outgroup)
+---------------------------------------
+f4(source1, source2; reference, outgroup)
+```
+
+```python
+result = admixpy.f4_ratio(
+    prefix,
+    target="Target",
+    source1="Source1",
+    source2="Source2",
+    reference="Reference",
+    outgroup="Outgroup",
+)
+print(result)
+```
+
+`est` is the `source1` proportion. `reference` can be a single name or a list.
+For batches, pass a `models` data frame with columns `target`, `source1`,
+`source2`, `reference`, and `outgroup`. Results are available in `summary`,
+`components`, `settings`, and optionally `blocks` with `return_blocks=True`.
+The ratio assumes a valid two-source topology and does not test model fit.
+
 ## Citation
 
 AdmixPy implements methods from Patterson et al. (2012) and Maier et al. (2023).

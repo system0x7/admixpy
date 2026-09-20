@@ -1,4 +1,4 @@
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 from .fstats import (
     BlockStats,
@@ -62,6 +62,7 @@ from .genotypes import (
     read_snp,
     tgeno_to_afs,
 )
+from .ratios import F4RatioResult, f4_ratio
 
 __all__ = [
     "__version__",
@@ -70,6 +71,7 @@ __all__ = [
     "F2Blocks",
     "F4BlockCache",
     "F4ModelCache",
+    "F4RatioResult",
     "QpAdmResult",
     "QpWaveStats",
     "afs_to_f2_blocks",
@@ -85,6 +87,7 @@ __all__ = [
     "f3_from_f2",
     "f3_stats_from_geno",
     "f4",
+    "f4_ratio",
     "f4_model_cache",
     "f4_from_f2",
     "f4_stats",
