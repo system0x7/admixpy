@@ -72,6 +72,11 @@ admixpy.f3(data, pop1=None, pop2=None, pop3=None, *, unique_only=True,
            resampling="pairwise_counts", verbose=True, **kwargs)
 admixpy.f4(data, pop1, pop2=None, pop3=None, pop4=None, *, comb=True,
            unique_only=True, afprod=False, verbose=True, **kwargs)
+admixpy.f4_ratio(data, target=None, source1=None, source2=None,
+                 reference=None, outgroup=None, *, models=None,
+                 allsnps=False, resampling="pairwise_counts",
+                 confidence=0.95, denominator_z_min=3.0,
+                 return_blocks=False, verbose=True, **kwargs)
 admixpy.qpwave(data, left, right, ranks=None, left_base=None,
                right_base=None, rcond=1e-10, diag=0.0, max_nfev=None,
                verbose=True, **kwargs)
@@ -79,6 +84,9 @@ admixpy.qpadm(data, target, left=None, right=None, sources=None,
               fudge=0.0001, fudge_twice=False, iterations=20, getcov=True,
               return_f4=False, return_stats=False, return_cov=False,
               verbose=True, *, popdrop=True, **kwargs)
+admixpy.qpadm_rotate(data, leftright, target, rightfix=None, *,
+                      source_sizes=None, full_results=False, getcov=False,
+                      use_cache=True, on_error="raise", verbose=True, **kwargs)
 ```
 
 `data` can be a supported genotype dataset prefix or precomputed f2 data.
@@ -120,6 +128,39 @@ By default, qpAdm also fits every nonempty subset of the sources. This requires
 retaining the weights and rank tests; `result.popdrop` will be `None`.
 `qpadm_multi(..., full_results=False)` automatically skips subset fits and
 weight standard errors because it returns only the rank-test tables.
+
+Rotating candidate sources between the left and right panels is available with
+`qpadm_rotate`. Unused candidates join `rightfix` on the right. Restrict source
+counts with `source_sizes`; omit it to test all counts with positive degrees of
+freedom. Preview the model table with `qpadm_rotate_models` using the same
+population arguments, without a `data` argument.
+
+```python
+rotation = admixpy.qpadm_rotate(
+    data, leftright=["SourceA", "SourceB", "SourceC"], target="Target",
+    rightfix=["ReferenceA", "ReferenceB", "ReferenceC"],
+    source_sizes=[1, 2], full_results=True, getcov=True,
+)
+rotation.models  # One row per model; population lists, fit and execution status
+rotation.weights  # One row per model/source: weight, se, z
+rotation.errors  # Model ID, error type and message
+rotation.settings  # Version and run options
+rotation.weights.to_csv("rotation_weights.csv", index=False)
+```
+
+Rotation results retain generation order and population lists. Model IDs are
+stable across source-count filters and identify the ordered population panels
+and bases, not the dataset or fitting settings. `full_results=False` returns
+fit summaries with missing feasibility and an empty weights table.
+`full_results=True` includes weights and feasibility; `getcov=True` additionally
+computes standard errors. Population-drop fits are skipped. There is no custom
+export method: use pandas on individual tables.
+
+By default, rotation errors raise. Set `on_error="record"` to retain model-level
+fit errors and continue; input validation and cache-construction errors still
+raise. An execution status of `ok` means the fit completed, regardless of its
+p-value. Sorting by p-value does not establish the best ancestry model because
+the reference panel changes between rotations.
 
 Population-drop `chisq`, `p`, and weights use the covariance of each retained
 subset, inverted after applying that subset's regularization. They match
@@ -259,35 +300,6 @@ popdrop:
 1000                                                                   Turkey_N      2   3  825.23 1.46e-178     False   FAIL
  ...
 ```
-
-## f4-ratio ancestry estimates
-
-`f4_ratio` estimates the contribution of `source1` to `target` in an assumed
-two-source model:
-
-```text
-f4(target, source2; reference, outgroup)
----------------------------------------
-f4(source1, source2; reference, outgroup)
-```
-
-```python
-result = admixpy.f4_ratio(
-    prefix,
-    target="Target",
-    source1="Source1",
-    source2="Source2",
-    reference="Reference",
-    outgroup="Outgroup",
-)
-print(result)
-```
-
-`est` is the `source1` proportion. `reference` can be a single name or a list.
-For batches, pass a `models` data frame with columns `target`, `source1`,
-`source2`, `reference`, and `outgroup`. Results are available in `summary`,
-`components`, `settings`, and optionally `blocks` with `return_blocks=True`.
-The ratio assumes a valid two-source topology and does not test model fit.
 
 ## Citation
 

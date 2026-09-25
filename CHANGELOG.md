@@ -2,6 +2,10 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.0.8 - 2026-09-25
+
+- Add qpAdm rotation and move qpAdm/qpWave code into dedicated modules.
+
 ## 1.0.7 - 2026-09-20
 
 ### Added

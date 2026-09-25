@@ -1,4 +1,4 @@
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 
 from .fstats import (
     BlockStats,
@@ -6,6 +6,7 @@ from .fstats import (
     F4BlockCache,
     F4ModelCache,
     QpAdmResult,
+    QpAdmRotationResult,
     QpWaveStats,
     afs_to_f2_blocks,
     block_covariance,
@@ -36,6 +37,8 @@ from .fstats import (
     qpadm_popdrop,
     qpadm_rankdrop,
     qpadm_weights,
+    qpadm_rotate,
+    qpadm_rotate_models,
     qpwave,
     qpwave_f4stats,
     qpwave_multi,
@@ -73,6 +76,7 @@ __all__ = [
     "F4ModelCache",
     "F4RatioResult",
     "QpAdmResult",
+    "QpAdmRotationResult",
     "QpWaveStats",
     "afs_to_f2_blocks",
     "anygeno_to_afs",
@@ -111,6 +115,8 @@ __all__ = [
     "qpadm_popdrop",
     "qpadm_rankdrop",
     "qpadm_weights",
+    "qpadm_rotate",
+    "qpadm_rotate_models",
     "qpwave",
     "qpwave_f4stats",
     "qpwave_multi",
