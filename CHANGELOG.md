@@ -2,6 +2,10 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## Unreleased
+
+- Adjust `qpadm_rotate` argument order to `(data, target, leftright, rightfix=None)`.
+
 ## 1.0.9 - 2026-10-11
 
 - Add `f4_proximity` to rank candidates by RMS f4 across a reference panel,
