@@ -2,7 +2,7 @@
 
 All notable changes to AdmixPy are documented in this file.
 
-## Unreleased
+## 1.0.10 - 2026-10-11
 
 - Adjust `qpadm_rotate` argument order to `(data, target, leftright, rightfix=None)`.
 

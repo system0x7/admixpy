@@ -644,7 +644,7 @@ class QpAdmRotationResult:
 
 
 def qpadm_rotate(
-    data, leftright, target, rightfix=None, *, source_sizes=None,
+    data, target, leftright, rightfix=None, *, source_sizes=None,
     full_results=False, getcov=False, use_cache=True, on_error="raise",
     verbose=True, **kwargs,
 ) -> QpAdmRotationResult:

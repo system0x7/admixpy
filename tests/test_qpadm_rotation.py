@@ -18,7 +18,7 @@ class RotationTests(unittest.TestCase):
 
     def rotate(self, **kwargs):
         return admixpy.qpadm_rotate(
-            self.blocks, ["A", "B", "C"], "T", ["R0", "R1"],
+            self.blocks, "T", ["A", "B", "C"], ["R0", "R1"],
             verbose=False, resampling="nominal_blocks", **kwargs,
         )
 

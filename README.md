@@ -86,7 +86,7 @@ admixpy.qpadm(data, target, left=None, right=None, sources=None,
               fudge=0.0001, fudge_twice=False, iterations=20, getcov=True,
               return_f4=False, return_stats=False, return_cov=False,
               verbose=True, *, popdrop=True, **kwargs)
-admixpy.qpadm_rotate(data, leftright, target, rightfix=None, *,
+admixpy.qpadm_rotate(data, target, leftright, rightfix=None, *,
                       source_sizes=None, full_results=False, getcov=False,
                       use_cache=True, on_error="raise", verbose=True, **kwargs)
 ```
@@ -146,7 +146,7 @@ population arguments, without a `data` argument.
 
 ```python
 rotation = admixpy.qpadm_rotate(
-    data, leftright=["SourceA", "SourceB", "SourceC"], target="Target",
+    data, target="Target", leftright=["SourceA", "SourceB", "SourceC"],
     rightfix=["ReferenceA", "ReferenceB", "ReferenceC"],
     source_sizes=[1, 2], full_results=True, getcov=True,
 )
