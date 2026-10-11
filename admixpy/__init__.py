@@ -1,4 +1,4 @@
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 
 from .fstats import (
     BlockStats,
@@ -17,6 +17,7 @@ from .fstats import (
     f3_from_f2,
     f3_stats_from_geno,
     f4,
+    f4_proximity,
     f4_model_cache,
     f4_from_f2,
     f4_stats,
@@ -91,6 +92,7 @@ __all__ = [
     "f3_from_f2",
     "f3_stats_from_geno",
     "f4",
+    "f4_proximity",
     "f4_ratio",
     "f4_model_cache",
     "f4_from_f2",

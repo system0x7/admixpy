@@ -72,6 +72,8 @@ admixpy.f3(data, pop1=None, pop2=None, pop3=None, *, unique_only=True,
            resampling="pairwise_counts", verbose=True, **kwargs)
 admixpy.f4(data, pop1, pop2=None, pop3=None, pop4=None, *, comb=True,
            unique_only=True, afprod=False, verbose=True, **kwargs)
+admixpy.f4_proximity(data, target, candidates, refs, *, outgroup,
+                     allsnps=False, verbose=True, **kwargs)
 admixpy.f4_ratio(data, target=None, source1=None, source2=None,
                  reference=None, outgroup=None, *, models=None,
                  allsnps=False, resampling="pairwise_counts",
@@ -103,6 +105,13 @@ Both direct-genotype modes use the direct per-SNP estimator and report the exact
 SNP count for each statistic; raw input is reduced to pairwise f2 values only
 when explicitly creating an f2 cache. An optional `model` column in an f4
 combination table scopes the shared panel separately for each model.
+
+`f4_proximity` ranks candidates by the RMS of
+`f4(outgroup, ref; candidate, target)` across `refs`. It returns `population`,
+`rms_f4`, `rms_z`, and the minimum contrast SNP count `n_snps`
+(NaN for precomputed f2 data). Rankings depend on the reference panel.
+The `outgroup` argument is required explicitly.
+It defaults to `allsnps=False`, so high missingness can reduce the shared SNP count.
 
 Direct genotype `f3` also defaults to `allsnps=True` and is calculated per SNP.
 By default, its corrected numerator is divided by unbiased target

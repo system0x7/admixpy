@@ -2,6 +2,13 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.0.9 - 2026-10-11
+
+- Add `f4_proximity` to rank candidates by RMS f4 across a reference panel,
+  with descriptive RMS Z-scores and minimum SNP counts.
+- Validate proximity inputs, preserve undefined Z-scores, and compute only
+  individual contrast variances by default.
+
 ## 1.0.8 - 2026-09-25
 
 - Add qpAdm rotation and move qpAdm/qpWave code into dedicated modules.

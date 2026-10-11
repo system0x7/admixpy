@@ -2901,6 +2901,69 @@ def f4(
     )
 
 
+def f4_proximity(
+    data,
+    target: str,
+    candidates: Sequence[str],
+    refs: Sequence[str],
+    *,
+    outgroup: str,
+    allsnps: bool = False,
+    verbose: bool = True,
+    **kwargs,
+) -> pd.DataFrame:
+    """Rank candidates by RMS f4(outgroup, ref; candidate, target).
+
+    Returns population, rms_f4, rms_z, and n_snps, sorted by rms_f4.
+    n_snps is the minimum SNP count across the reference contrasts, or NaN
+    when the underlying f4 result does not provide SNP counts (e.g. precomputed f2).
+    Proximity depends on the selected reference panel; rms_z is descriptive,
+    not a joint significance test. Undefined Z-scores produce a NaN rms_z.
+    Candidates and references must be nonempty and contain no duplicates.
+    Additional keyword arguments are passed to f4.
+    """
+    candidates = _as_list(candidates)
+    refs = _as_list(refs)
+    for pops, name in ((candidates, "candidates"), (refs, "refs")):
+        if not pops:
+            raise ValueError(f"{name} must contain at least one population")
+    for pop, name in ((target, "target"), (outgroup, "outgroup")):
+        if not isinstance(pop, str) or not pop:
+            raise ValueError(f"{name} must be a nonempty population name")
+    _require_unique_pops(candidates, "candidate")
+    _require_unique_pops(refs, "reference")
+    if not kwargs.pop("comb", True):
+        raise ValueError("f4_proximity requires comb=True to use every reference for each candidate")
+    kwargs.setdefault("unique_only", False)
+    kwargs.setdefault("covariance", False)
+    contrasts = pd.DataFrame(f4(
+        data,
+        outgroup,
+        refs,
+        candidates,
+        target,
+        comb=True,
+        allsnps=allsnps,
+        verbose=verbose,
+        **kwargs,
+    ))
+    contrasts["est_squared"] = contrasts["est"] ** 2
+    contrasts["z_squared"] = contrasts["z"] ** 2
+    if "n" not in contrasts:
+        contrasts["n"] = np.nan
+    proximity = contrasts.groupby("pop3", sort=False).agg(
+        rms_f4=("est_squared", lambda values: np.mean(values.to_numpy())),
+        rms_z=("z_squared", lambda values: np.mean(values.to_numpy())),
+        n_snps=("n", "min"),
+    )
+    proximity[["rms_f4", "rms_z"]] = np.sqrt(proximity[["rms_f4", "rms_z"]])
+    return (
+        proximity.rename_axis("population")
+        .reset_index()
+        .sort_values("rms_f4", kind="stable", ignore_index=True)
+    )
+
+
 def _contrast_pops(pops: Sequence[str], base: str | None, name: str) -> tuple[str, list[str]]:
     pops = list(pops)
     _require_unique_pops(pops, name)
