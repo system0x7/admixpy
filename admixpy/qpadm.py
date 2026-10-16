@@ -7,7 +7,8 @@ from hashlib import sha256
 import json
 from numbers import Integral
 import math
-from typing import Sequence
+from pathlib import Path
+from typing import Any, Iterable, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,7 @@ from scipy import linalg
 
 from . import fstats as _fstats
 from .fstats import (
-    F4BlockCache, _as_pop_list, _chi2_sf, _default_genotype_allsnps,
+    F2Blocks, F4BlockCache, F4ModelCache, _as_pop_list, _chi2_sf, _default_genotype_allsnps,
     _format_number, _format_pvalue, _format_significant, _models_frame,
     _require_unique_pops, _select_f4_block_cache_model, _validate_resampling,
 )
@@ -644,9 +645,18 @@ class QpAdmRotationResult:
 
 
 def qpadm_rotate(
-    data, target, leftright, rightfix=None, *, source_sizes=None,
-    full_results=False, getcov=False, use_cache=True, on_error="raise",
-    verbose=True, **kwargs,
+    data: str | Path | F2Blocks | F4ModelCache | F4BlockCache,
+    target: str,
+    leftright: Iterable[str],
+    rightfix: Iterable[str] | None = None,
+    *,
+    source_sizes: Iterable[int] | None = None,
+    full_results: bool = False,
+    getcov: bool = False,
+    use_cache: bool = True,
+    on_error: Literal["raise", "record"] = "raise",
+    verbose: bool = True,
+    **kwargs: Any,
 ) -> QpAdmRotationResult:
     """Rotate candidate sources onto the reference panel and test each model.
 

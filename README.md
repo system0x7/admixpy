@@ -86,9 +86,20 @@ admixpy.qpadm(data, target, left=None, right=None, sources=None,
               fudge=0.0001, fudge_twice=False, iterations=20, getcov=True,
               return_f4=False, return_stats=False, return_cov=False,
               verbose=True, *, popdrop=True, **kwargs)
-admixpy.qpadm_rotate(data, target, leftright, rightfix=None, *,
-                      source_sizes=None, full_results=False, getcov=False,
-                      use_cache=True, on_error="raise", verbose=True, **kwargs)
+admixpy.qpadm_rotate(
+    data: str | Path | F2Blocks | F4ModelCache | F4BlockCache,
+    target: str,
+    leftright: Iterable[str],
+    rightfix: Iterable[str] | None = None,
+    *,
+    source_sizes: Iterable[int] | None = None,
+    full_results: bool = False,
+    getcov: bool = False,
+    use_cache: bool = True,
+    on_error: Literal["raise", "record"] = "raise",
+    verbose: bool = True,
+    **kwargs: Any,
+) -> QpAdmRotationResult
 ```
 
 `data` can be a supported genotype dataset prefix or precomputed f2 data.
