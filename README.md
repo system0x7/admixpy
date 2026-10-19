@@ -72,7 +72,7 @@ admixpy.f3(data, pop1=None, pop2=None, pop3=None, *, unique_only=True,
            resampling="pairwise_counts", verbose=True, **kwargs)
 admixpy.f4(data, pop1, pop2=None, pop3=None, pop4=None, *, comb=True,
            unique_only=True, afprod=False, verbose=True, **kwargs)
-admixpy.f4_proximity(data, target, candidates, refs, *, outgroup=None,
+admixpy.f4_proximity(data, target, candidates, refs, *, outgroup,
                      allsnps=False, verbose=True, **kwargs)
 admixpy.f4_ratio(data, target=None, source1=None, source2=None,
                  reference=None, outgroup=None, *, comb=True, models=None,
@@ -115,9 +115,9 @@ combination table scopes the shared panel separately for each model.
 `f4(outgroup, ref; candidate, target)` across `refs`. It returns `population`,
 `rms_f4`, `rms_z`, and the minimum contrast SNP count `n_snps`
 (NaN for precomputed f2 data). Rankings depend on the reference panel.
-If `outgroup` is omitted, the first entry in `refs` becomes the outgroup and
-the remaining entries supply the contrasts, requiring at least two references.
-With an explicit `outgroup`, all entries in `refs` are treated as references.
+The `outgroup` argument must be supplied explicitly. All entries in `refs`
+are treated as references. Choose an outgroup appropriate to the comparison,
+rankings depend on both the outgroup and reference panel.
 It defaults to `allsnps=False`, so high missingness can reduce the shared SNP count.
 
 Direct genotype `f3` also defaults to `allsnps=True` and is calculated per SNP.

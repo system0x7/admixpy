@@ -2907,7 +2907,7 @@ def f4_proximity(
     candidates: Sequence[str],
     refs: Sequence[str],
     *,
-    outgroup: str | None = None,
+    outgroup: str,
     allsnps: bool = False,
     verbose: bool = True,
     **kwargs,
@@ -2920,8 +2920,7 @@ def f4_proximity(
     Proximity depends on the selected reference panel; rms_z is descriptive,
     not a joint significance test. Undefined Z-scores produce a NaN rms_z.
     Candidates and references must be nonempty and contain no duplicates.
-    If outgroup is omitted, use the first reference as the outgroup and
-    contrast against the remaining references (at least two refs are required).
+    Outgroup must be supplied explicitly; all refs are treated as references.
     Additional keyword arguments are passed to f4.
     """
     candidates = _as_list(candidates)
@@ -2931,10 +2930,6 @@ def f4_proximity(
             raise ValueError(f"{name} must contain at least one population")
     _require_unique_pops(candidates, "candidate")
     _require_unique_pops(refs, "reference")
-    if outgroup is None:
-        if len(refs) < 2:
-            raise ValueError("refs must contain at least two populations when outgroup is omitted")
-        outgroup, refs = refs[0], refs[1:]
     for pop, name in ((target, "target"), (outgroup, "outgroup")):
         if not isinstance(pop, str) or not pop:
             raise ValueError(f"{name} must be a nonempty population name")

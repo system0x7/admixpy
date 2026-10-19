@@ -31,11 +31,6 @@ class F4ProximityTests(unittest.TestCase):
                 "unused", "O", ["R1", "R2"], ["B", "A"], "T",
                 allsnps=True, verbose=False,
             )
-            implicit = admixpy.f4_proximity(
-                "unused", "T", ["B", "A"], ["O", "R1", "R2"],
-                allsnps=True, verbose=False,
-            )
-        pd.testing.assert_frame_equal(implicit, result)
         for row in result.itertuples(index=False):
             expected = []
             for ref in ["R1", "R2"]:
@@ -87,6 +82,8 @@ class F4ProximityTests(unittest.TestCase):
             ({"refs": ["R", "R"]}, "Duplicate reference"),
             ({"target": ["T", "T2"]}, "target must be"),
             ({"outgroup": ""}, "outgroup must be"),
+            ({"outgroup": None}, "outgroup must be"),
+            ({"outgroup": ["O"]}, "outgroup must be"),
             ({"comb": False}, "requires comb=True"),
         ]
         with patch("admixpy.fstats.f4") as compute:
@@ -97,26 +94,10 @@ class F4ProximityTests(unittest.TestCase):
                     admixpy.f4_proximity("unused", **options)
             compute.assert_not_called()
 
-    def test_default_outgroup_uses_first_reference_without_mutating_input(self):
-        frame = pd.DataFrame(dict(pop3=["A"], est=[3.], z=[2.], n=[42]))
-        refs = ["O", "R"]
-        with patch("admixpy.fstats.f4", return_value=frame) as compute:
-            for options in ({}, {"outgroup": None}):
-                result = admixpy.f4_proximity("unused", "T", ["A"], refs, **options)
-                self.assertEqual(compute.call_args.args, ("unused", "O", ["R"], ["A"], "T"))
-                self.assertEqual(result.iloc[0].tolist(), ["A", 3., 2., 42])
-        self.assertEqual(refs, ["O", "R"])
-
-    def test_default_outgroup_requires_remaining_unique_references(self):
-        cases = [
-            ([], "refs must contain"),
-            (["O"], "at least two populations"),
-            ("O", "at least two populations"),
-            (["O", "O"], "Duplicate reference"),
-        ]
+    def test_outgroup_is_required_even_with_multiple_references(self):
         with patch("admixpy.fstats.f4") as compute:
-            for refs, message in cases:
-                with self.subTest(refs=refs), self.assertRaisesRegex(ValueError, message):
+            for refs in (["R"], ["O", "R1", "R2"]):
+                with self.subTest(refs=refs), self.assertRaisesRegex(TypeError, "outgroup"):
                     admixpy.f4_proximity("unused", "T", ["A"], refs)
             compute.assert_not_called()
 

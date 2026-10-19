@@ -2,6 +2,11 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## Unreleased
+
+- Require an explicit `outgroup` for `f4_proximity` instead of selecting the
+  first reference automatically.
+
 ## 1.0.12 - 2026-10-19
 
 - Accept lists for all five `f4_ratio` population arguments, with Cartesian
