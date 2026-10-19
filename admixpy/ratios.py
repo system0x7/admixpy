@@ -1,12 +1,14 @@
 from dataclasses import dataclass
+from itertools import product
 from statistics import NormalDist
+from typing import Sequence
 import warnings
 
 import numpy as np
 import pandas as pd
 
 from .fstats import (
-    F4BlockCache, _default_genotype_allsnps, _set_direct_resampling,
+    F4BlockCache, _as_list, _default_genotype_allsnps, _set_direct_resampling,
     _validate_resampling, f4_stats,
 )
 
@@ -32,7 +34,7 @@ class F4RatioResult:
         )
 
 
-def _ratio_models(target, source1, source2, reference, outgroup, models):
+def _ratio_models(target, source1, source2, reference, outgroup, models, comb=True):
     if models is not None:
         if any(value is not None for value in (target, source1, source2, reference, outgroup)):
             raise ValueError("Supply either models or individual population arguments")
@@ -55,13 +57,18 @@ def _ratio_models(target, source1, source2, reference, outgroup, models):
             raise ValueError(
                 f"f4_ratio() missing required population {noun}: {', '.join(missing)}"
             )
-        refs = [reference] if isinstance(reference, str) else list(reference)
-        if not refs:
-            raise ValueError("reference must contain at least one population")
-        frame = pd.DataFrame(
-            [[target, source1, source2, ref, outgroup] for ref in refs],
-            columns=_POP_COLUMNS,
-        )
+        populations = {name: _as_list(value) for name, value in values.items()}
+        for name, pops in populations.items():
+            if not pops:
+                raise ValueError(f"{name} must contain at least one population")
+        if comb:
+            frame = pd.DataFrame(product(*populations.values()), columns=_POP_COLUMNS)
+        else:
+            if len({len(pops) for pops in populations.values()}) != 1:
+                raise ValueError(
+                    "With comb=False, target/source1/source2/reference/outgroup must have equal lengths"
+                )
+            frame = pd.DataFrame(populations)
     if frame.empty:
         raise ValueError("At least one ratio model/reference is required")
     for i, values in enumerate(frame.itertuples(index=False, name=None), 1):
@@ -85,12 +92,13 @@ def _ratio_uncertainty(full, loo, weights):
 
 def f4_ratio(
     data,
-    target: str | None = None,
-    source1: str | None = None,
-    source2: str | None = None,
-    reference=None,
-    outgroup: str | None = None,
+    target: str | Sequence[str] | None = None,
+    source1: str | Sequence[str] | None = None,
+    source2: str | Sequence[str] | None = None,
+    reference: str | Sequence[str] | None = None,
+    outgroup: str | Sequence[str] | None = None,
     *,
+    comb: bool = True,
     models=None,
     allsnps: bool = False,
     resampling: str = "pairwise_counts",
@@ -104,15 +112,19 @@ def f4_ratio(
     f4(target, source2; reference, outgroup) /
     f4(source1, source2; reference, outgroup).
 
+    Population arguments accept strings or lists. With comb=True, evaluate
+    every combination; with comb=False, pair equal-length inputs by position.
+    Alternatively, supply explicit rows via models.
+
     Assumes a valid two-source topology and does not test model fit.
     """
-    model_table = _ratio_models(target, source1, source2, reference, outgroup, models)
+    model_table = _ratio_models(target, source1, source2, reference, outgroup, models, comb)
     resampling = _validate_resampling(resampling)
     if not np.isfinite(confidence) or not 0 < confidence < 1:
         raise ValueError("confidence must be between 0 and 1")
     if not np.isfinite(denominator_z_min) or denominator_z_min <= 0:
         raise ValueError("denominator_z_min must be finite and positive")
-    reserved = {"keep_blocks", "keep_loo", "covariance", "unique_only", "comb"} & kwargs.keys()
+    reserved = {"keep_blocks", "keep_loo", "covariance", "unique_only"} & kwargs.keys()
     if reserved:
         raise ValueError(f"f4_ratio manages these f4 options internally: {sorted(reserved)}")
     if isinstance(data, F4BlockCache):

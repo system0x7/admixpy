@@ -72,10 +72,10 @@ admixpy.f3(data, pop1=None, pop2=None, pop3=None, *, unique_only=True,
            resampling="pairwise_counts", verbose=True, **kwargs)
 admixpy.f4(data, pop1, pop2=None, pop3=None, pop4=None, *, comb=True,
            unique_only=True, afprod=False, verbose=True, **kwargs)
-admixpy.f4_proximity(data, target, candidates, refs, *, outgroup,
+admixpy.f4_proximity(data, target, candidates, refs, *, outgroup=None,
                      allsnps=False, verbose=True, **kwargs)
 admixpy.f4_ratio(data, target=None, source1=None, source2=None,
-                 reference=None, outgroup=None, *, models=None,
+                 reference=None, outgroup=None, *, comb=True, models=None,
                  allsnps=False, resampling="pairwise_counts",
                  confidence=0.95, denominator_z_min=3.0,
                  return_blocks=False, verbose=True, **kwargs)
@@ -96,6 +96,11 @@ Population arguments can be strings or lists where the wrapper supports multiple
 combinations. For PLINK `.bed/.bim/.fam` input, population labels are read from
 the FID column of the `.fam` file.
 
+`f4_ratio` accepts strings or lists for all five population arguments.
+The default `comb=True` evaluates every combination; `comb=False` pairs
+entries by position and requires equal lengths, treating a string as one entry.
+Use `models=` for explicit rows instead of individual population arguments.
+
 For direct genotype input, `f3`, `f4`, `qpwave`, and `qpadm` default to
 `allsnps=True`, matching the ADMIXTOOLS1-style behavior of estimating each
 statistic from its available SNPs. For precomputed f2 input, `allsnps` defaults
@@ -110,7 +115,9 @@ combination table scopes the shared panel separately for each model.
 `f4(outgroup, ref; candidate, target)` across `refs`. It returns `population`,
 `rms_f4`, `rms_z`, and the minimum contrast SNP count `n_snps`
 (NaN for precomputed f2 data). Rankings depend on the reference panel.
-The `outgroup` argument is required explicitly.
+If `outgroup` is omitted, the first entry in `refs` becomes the outgroup and
+the remaining entries supply the contrasts, requiring at least two references.
+With an explicit `outgroup`, all entries in `refs` are treated as references.
 It defaults to `allsnps=False`, so high missingness can reduce the shared SNP count.
 
 Direct genotype `f3` also defaults to `allsnps=True` and is calculated per SNP.

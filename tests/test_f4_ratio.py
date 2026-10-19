@@ -1,4 +1,5 @@
 import tempfile
+from itertools import product
 import unittest
 import warnings
 from pathlib import Path
@@ -143,6 +144,68 @@ class F4RatioTests(unittest.TestCase):
         self.assertEqual(result.summary.reference.tolist(), ["R", "R2", "R"])
         np.testing.assert_allclose(result.summary.est, .25)
         self.assertEqual(result.components.model.tolist(), [1, 1, 2, 2, 3, 3])
+
+    def test_population_lists_evaluate_cartesian_product(self):
+        af = allele_data(noisy=True)
+        populations = {}
+        for name, pop in POPS.items():
+            alternate = pop + "_alt"
+            af.afs[alternate] = af.afs[pop]
+            af.counts[alternate] = af.counts[pop]
+            populations[name] = [pop, alternate]
+        with patch("admixpy.fstats.anygeno_to_afs", return_value=af) as reader:
+            result = admixpy.f4_ratio("unused", **populations, verbose=False)
+        reader.assert_called_once()
+        expected = list(product(*populations.values()))
+        self.assertEqual(
+            list(result.summary[list(POPS)].itertuples(index=False, name=None)),
+            expected,
+        )
+        scalar = direct(af)
+        np.testing.assert_allclose(result.summary.est, scalar.summary.est[0])
+        np.testing.assert_allclose(result.summary.se, scalar.summary.se[0])
+        self.assertEqual(result.summary.model.tolist(), list(range(1, 33)))
+
+    def test_population_lists_pair_by_position(self):
+        af = allele_data(noisy=True)
+        populations = {name: [pop, pop] for name, pop in POPS.items()}
+        populations["reference"] = ["R2", "R"]
+        with patch("admixpy.fstats.anygeno_to_afs", return_value=af) as reader:
+            result = admixpy.f4_ratio(
+                "unused", **populations, comb=False, verbose=False,
+            )
+        reader.assert_called_once()
+        self.assertEqual(result.summary.reference.tolist(), ["R2", "R"])
+        self.assertEqual(result.summary.model.tolist(), [1, 2])
+        for i, ref in enumerate(["R2", "R"]):
+            scalar = direct(af, reference=ref)
+            self.assertAlmostEqual(result.summary.est[i], scalar.summary.est[0])
+            self.assertAlmostEqual(result.summary.se[i], scalar.summary.se[0])
+        scalar = direct(af, comb=False)
+        self.assertEqual(len(scalar.summary), 1)
+
+    def test_list_validation_fails_before_reading(self):
+        for name in POPS:
+            invalid = [([], True, f"{name} must contain at least one population"),
+                       ([None], True, "nonempty strings"),
+                       ([POPS[name], POPS[name]], False, "must have equal lengths")]
+            for value, comb, message in invalid:
+                with self.subTest(name=name, value=value, comb=comb):
+                    with patch("admixpy.fstats.anygeno_to_afs") as reader:
+                        with self.assertRaisesRegex(ValueError, message):
+                            admixpy.f4_ratio(
+                                "unused", **{**POPS, name: value}, comb=comb,
+                            )
+                        reader.assert_not_called()
+
+    def test_model_table_accepts_comb_false(self):
+        af = allele_data()
+        with patch("admixpy.fstats.anygeno_to_afs", return_value=af):
+            result = admixpy.f4_ratio(
+                "unused", models=[POPS], comb=False, verbose=False,
+            )
+        self.assertEqual(len(result.summary), 1)
+        self.assertAlmostEqual(result.summary.est[0], .25)
 
     def test_weak_and_undefined_denominators_have_no_confidence_interval(self):
         af = allele_data()

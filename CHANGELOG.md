@@ -2,6 +2,12 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.0.12 - 2026-10-19
+
+- Accept lists for all five `f4_ratio` population arguments, with Cartesian
+  combinations by default and positional pairing via `comb=False`.
+- Default `f4_proximity` to the first reference as the outgroup when omitted.
+
 ## 1.0.10 - 2026-10-11
 
 - Adjust `qpadm_rotate` argument order to `(data, target, leftright, rightfix=None)`.
