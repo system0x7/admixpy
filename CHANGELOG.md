@@ -2,7 +2,7 @@
 
 All notable changes to AdmixPy are documented in this file.
 
-## Unreleased
+## 1.0.13 - 2026-10-19
 
 - Require an explicit `outgroup` for `f4_proximity` instead of selecting the
   first reference automatically.
