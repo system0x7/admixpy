@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "admixpy"
 dynamic = ["version"]
-description = "Fast Python implementation of ADMIXTOOLS-style f-statistics, qpadm, and qpwave"
+description = "Population-genetic f-statistics, qpAdm, qpWave, and admixture dating in Python"
 readme = "README.md"
 license = "MIT"
 authors = [
     { name = "system0x7" },
 ]
 requires-python = ">=3.10"
-keywords = ["population genetics", "f-statistics", "qpadm", "qpwave", "admixture"]
+keywords = ["population genetics", "f-statistics", "qpadm", "qpwave", "admixture", "admixture dating"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Science/Research",

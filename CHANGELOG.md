@@ -2,6 +2,19 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.1.0 - 2026-10-29
+
+- Add `REFERENCE.md` for the public API, result objects, options, and method
+  details; shorten the README to installation and common examples.
+- Add `admixture_date` and `AdmixtureDateResult` for single-pulse
+  admixture dating from individual genotypes, with FFT and direct covariance,
+  chromosome-jackknife uncertainty, explicit genetic-map units, and fit diagnostics.
+- Report both the fitted decay rate and the date
+- Select individual target IDs with `target_iids`, matching the `iid` metadata
+  column; omit it to use all individuals in the target population.
+- Support finite negative genetic-map coordinates, including AADR chromosome
+  starts, by normalizing each chromosome's origin without changing distances.
+
 ## 1.0.13 - 2026-10-19
 
 - Require an explicit `outgroup` for `f4_proximity` instead of selecting the

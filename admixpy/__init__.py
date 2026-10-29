@@ -1,4 +1,4 @@
-__version__ = "1.0.13"
+__version__ = "1.1.0"
 
 from .fstats import (
     BlockStats,
@@ -67,10 +67,12 @@ from .genotypes import (
     tgeno_to_afs,
 )
 from .ratios import F4RatioResult, f4_ratio
+from .admixture_date import AdmixtureDateResult, admixture_date
 
 __all__ = [
     "__version__",
     "AfData",
+    "AdmixtureDateResult",
     "BlockStats",
     "F2Blocks",
     "F4BlockCache",
@@ -80,6 +82,7 @@ __all__ = [
     "QpAdmRotationResult",
     "QpWaveStats",
     "afs_to_f2_blocks",
+    "admixture_date",
     "anygeno_to_afs",
     "block_covariance",
     "detect_geno_format",
