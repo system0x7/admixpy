@@ -105,6 +105,10 @@ def _read_input(data, target, sources, target_iids, format):
     return g, ind, snp, format
 
 
+class _InsufficientInformativeSNPs(ValueError):
+    pass
+
+
 def _ancestry_scores(g, pa, pb, min_snps):
     """Regression mixture coefficient and sqrt(alpha*beta)-scaled score.
 
@@ -113,7 +117,9 @@ def _ancestry_scores(g, pa, pb, min_snps):
     """
     valid = np.isfinite(g) & np.isfinite(pa) & np.isfinite(pb) & (pa != pb)
     if valid.sum() < min_snps:
-        raise ValueError(f"Fewer than min_snps={min_snps} observed ancestry-informative SNPs")
+        raise _InsufficientInformativeSNPs(
+            f"Fewer than min_snps={min_snps} observed ancestry-informative SNPs (observed {valid.sum()})"
+        )
     delta = pa[valid] - pb[valid]
     alpha = float(np.dot(g[valid] / 2 - pb[valid], delta) / np.dot(delta, delta))
     if not 0 < alpha < 1:
@@ -297,7 +303,11 @@ def admixture_date(
     Selected genotypes are loaded into memory.
 
     ``target_iids`` selects individual IDs within the target population. Omit it
-    to select all target individuals.
+    to select all target individuals. Targets with fewer than ``min_snps``
+    observed ancestry-informative SNPs are skipped with a warning and recorded
+    in ``settings['skipped_individuals']`` (ID to reason). Counts and
+    ``settings['target_iids']`` include only retained targets. If none remain,
+    a ValueError is raised.
 
     All distance arguments are Morgans. Input maps default to Morgans for
     EIGENSTRAT-family files and centiMorgans for PLINK; ``map_unit`` overrides
@@ -390,10 +400,15 @@ def admixture_date(
     observed = np.zeros(len(chroms), dtype=int)
     used_snps = np.zeros(len(g), bool)
     coefficients = {}
+    skipped_individuals = {}
     for col in np.flatnonzero(labels == target):
         iid = ind.iid.iloc[col]
         try:
             score, alpha = _ancestry_scores(g[:, col], pa, pb, min_snps)
+        except _InsufficientInformativeSNPs as exc:
+            skipped_individuals[iid] = str(exc)
+            warnings.warn(f"Skipping target individual {iid}: {exc}", RuntimeWarning, stacklevel=2)
+            continue
         except ValueError as exc:
             raise ValueError(f"Target individual {iid}: {exc}") from exc
         coefficients[iid] = alpha
@@ -404,6 +419,12 @@ def admixture_date(
                                        max_distance, method, mesh_subdivisions)
         if verbose:
             print(f"  Processed {iid}: {np.isfinite(score).sum()} informative SNPs", flush=True)
+
+    if not coefficients:
+        raise ValueError(
+            f"No usable target individuals remain: all {len(skipped_individuals)} targets have "
+            f"fewer than min_snps={min_snps} observed ancestry-informative SNPs"
+        )
 
     total = by_chrom.sum(axis=0)
     covariance, distance = _covariance(total)
@@ -473,6 +494,7 @@ def admixture_date(
     diagnostics = pd.DataFrame([dict(sse=fit["sse"], nrmsd=fit["nrmsd"],
         condition=fit["condition"], rate_at_boundary=fit["boundary"],
         n_jackknife=len(rows), n_failed_jackknife=failed,
+        n_skipped_individuals=len(skipped_individuals),
         date_relative_se=float(se[0] / full[0]) if np.isfinite(se[0]) else np.nan,
         min_ancestry_coefficient=min(coefficients.values()),
         max_ancestry_coefficient=max(coefficients.values()))])
@@ -493,6 +515,7 @@ def admixture_date(
                     ancestry_coefficients=coefficients, jackknife_coefficients="fixed_full_data",
                     confidence=confidence, min_snps=min_snps, autosomes_only=autosomes_only,
                     adjust_pseudohaploid=adjust_pseudohaploid, target_iids=list(coefficients),
+                    skipped_individuals=skipped_individuals,
                     covariance_centering="pooled_symmetric_pair_endpoints",
                     reference_compatibility="not established")
     if flags:

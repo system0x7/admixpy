@@ -340,12 +340,15 @@ result.curve.to_csv("admixture_covariance.csv", index=False)
 
 `target` names one population. Use `target_iids=["sample_id"]` to restrict the
 analysis to specific individual IDs (`iid`) in that population. Omit it to use
-all individuals in the target population. Result settings record the selected
-IDs under `target_iids`. Target and source
-populations must be distinct. All selected target individuals must have at
-least `min_snps` observed informative SNPs and an interior ancestry regression
-coefficient. An invalid individual raises an error identifying that sample;
-individuals are never silently removed. The regression coefficients stored in
+all individuals in the target population. Result settings record retained
+IDs under `target_iids`. Target and source populations must be distinct.
+Targets with fewer than `min_snps` observed informative SNPs are skipped with
+a warning identifying the sample and observed count. Excluded IDs and reasons
+are recorded in `settings['skipped_individuals']`, and their count in
+`diagnostics.n_skipped_individuals`. Only retained targets contribute to the
+curve, counts, and jackknife. If none remain, the function raises an error.
+An ancestry regression coefficient outside (0, 1) still raises an error
+identifying that sample. The regression coefficients stored in
 `settings` are nuisance parameters, not validated ancestry-proportion estimates.
 
 The function supports EIGENSTRAT text, packed AncestryMap, TGENO, and SNP-major
@@ -460,7 +463,7 @@ reference populations. Two-pulse and continuous-history models are not included.
 | `method` | `fft` for mesh-based computation; `direct` for exact SNP-pair enumeration. |
 | `mesh_subdivisions` | Positive integer; mesh spacing is `bin_size / mesh_subdivisions`. |
 | `rate_bounds` | Two finite positive increasing bounds on decay rate, in inverse Morgans. |
-| `min_snps` | Minimum observed informative SNPs per selected target individual; integer >=2. |
+| `min_snps` | Minimum observed informative SNPs per target individual; targets below this threshold are skipped with a warning. Integer >=2. |
 | `autosomes_only` | Restrict to human chromosomes 1–22; False permits other labels. |
 | `adjust_pseudohaploid` | Reference allele-count adjustment using the existing detection procedure. |
 | `format` | Optional genotype-format override. |

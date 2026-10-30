@@ -303,13 +303,49 @@ class AdmixtureDateTests(unittest.TestCase):
             expected = sum((r.curve.n_pairs.to_numpy() for r in singles))
             np.testing.assert_array_equal(combined.curve.n_pairs, expected)
 
-    def test_all_missing_individual_and_indistinguishable_references_raise(self):
+    def test_low_coverage_targets_are_skipped_without_changing_retained_results(self):
+        g, pos, chrom, pops = self.sim
+        for n_observed in [0, 99, 100]:
+            with self.subTest(n_observed=n_observed), tempfile.TemporaryDirectory() as tmp:
+                missing = g[:1600].copy()
+                missing[:n_observed, 0] = np.where(
+                    np.arange(n_observed) % 2, missing[:n_observed, 4], missing[:n_observed, 6]
+                )
+                missing[n_observed:, 0] = np.nan
+                pref = write_eigenstrat(tmp, missing, pos[:1600], chrom[:1600], pops)
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    result = admixpy.admixture_date(pref, "T", ["A", "B"],
+                                                    max_distance=.1, jackknife=None, verbose=False)
+                skipped = n_observed < 100
+                skip_warnings = [w for w in caught if "Skipping target individual" in str(w.message)]
+                self.assertEqual(len(skip_warnings), int(skipped))
+                self.assertEqual(result.diagnostics.n_skipped_individuals[0], int(skipped))
+                self.assertEqual(result.summary.n_individuals[0], 3 if skipped else 4)
+                ids = ["i1", "i2", "i3"] if skipped else ["i0", "i1", "i2", "i3"]
+                self.assertEqual(result.settings["target_iids"], ids)
+                self.assertEqual(list(result.settings["ancestry_coefficients"]), ids)
+                if skipped:
+                    self.assertIn(f"observed {n_observed}", result.settings["skipped_individuals"]["i0"])
+                    self.assertIn("i0", str(skip_warnings[0].message))
+                    retained = run_date(pref, target_iids=ids, max_distance=.1, jackknife=None)
+                    pd.testing.assert_frame_equal(result.curve, retained.curve)
+                    pd.testing.assert_frame_equal(result.parameters, retained.parameters)
+                    self.assertEqual(result.summary.n_snps[0], retained.summary.n_snps[0])
+                else:
+                    self.assertEqual(result.settings["skipped_individuals"], {})
+
+    def test_no_usable_targets_and_indistinguishable_references_raise(self):
         g, pos, chrom, pops = self.sim
         with tempfile.TemporaryDirectory() as tmp:
             missing = g[:300].copy()
             missing[:, 0] = np.nan
             pref = write_eigenstrat(tmp, missing, pos[:300], chrom[:300], pops)
-            with self.assertRaisesRegex(ValueError, "Target individual i0.*min_snps"):
+            with self.assertRaisesRegex(ValueError, "No usable target individuals.*min_snps"):
+                run_date(pref, target_iids=["i0"])
+            missing[:, :4] = np.nan
+            pref = write_eigenstrat(tmp, missing, pos[:300], chrom[:300], pops)
+            with self.assertRaisesRegex(ValueError, "No usable target individuals.*all 4 targets"):
                 run_date(pref)
             same = g[:300].copy()
             same[:, 6:] = same[:, 4:6]

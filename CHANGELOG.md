@@ -2,6 +2,11 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.1.1 - 2026-10-30
+
+- Skip target individuals below `min_snps` in `admixture_date`, with warnings
+  and recorded exclusions; raise an error if no usable targets remain.
+
 ## 1.1.0 - 2026-10-29
 
 - Add `REFERENCE.md` for the public API, result objects, options, and method
