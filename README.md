@@ -90,12 +90,35 @@ chosen references describe a valid demographic model.
 See [admixture dating](REFERENCE.md#admixture-dating) for every option, map units,
 generation conventions, uncertainty, result tables, and diagnostic flags.
 
+## Exploratory source screening
+
+```python
+screen = ap.screening(
+    prefix,
+    target="Target",
+    candidates=["SourceA", "SourceB", "SourceC"],
+    refs=["Outgroup", "ReferenceA", "ReferenceB", "ReferenceC", "ReferenceD"],
+    # outgroup="Outgroup",  # Defaults to the first entry of refs
+    source_sizes=[2, 3],
+    # allsnps=True,  # Optional: use available SNPs per contrast with genotype input
+)
+print(screen)  # Five closest models per source count, with a source key
+screen.models.to_csv("screen_models.csv", index=False)
+screen.weights.to_csv("screen_weights.csv", index=False)
+```
+
+Screening loads one joint f4 basis and fits constrained source mixtures. Lower covariance-aware scores indicate closer fits relative to estimated uncertainty, these are descriptive scores, with no model-fit p-values.
+Compare models within source count and check selected models with qpAdm.
+Screening uses qpAdm's `f4(source, target; reference, outgroup)` contrast basis.
+See [screening](REFERENCE.md#exploratory-source-screening) for scoring and output.
+
 ## Available analyses
 
 | Analysis | Functions | Reference |
 |---|---|---|
 | f-statistics and differentiation | `f2`, `fst`, `f3`, `f4` | [Statistics](REFERENCE.md#statistics) |
 | Relative affinity and ancestry ratios | `f4_proximity`, `f4_ratio` | [Statistics](REFERENCE.md#statistics) |
+| Exploratory source mixtures | `screening` | [Screening](REFERENCE.md#exploratory-source-screening) |
 | Ancestry models and rank tests | `qpadm`, `qpwave`, batch and rotation helpers | [Models](REFERENCE.md#qpadm-and-qpwave) |
 | Single-pulse dating | `admixture_date` | [Dating](REFERENCE.md#admixture-dating) |
 | Genotype conversion and filtering | Readers, allele-frequency conversion, SNP selection | [Genotypes](REFERENCE.md#genotype-utilities) |

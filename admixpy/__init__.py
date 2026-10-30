@@ -1,4 +1,4 @@
-__version__ = "1.1.1"
+__version__ = "1.1.2"
 
 from .fstats import (
     BlockStats,
@@ -68,6 +68,7 @@ from .genotypes import (
 )
 from .ratios import F4RatioResult, f4_ratio
 from .admixture_date import AdmixtureDateResult, admixture_date
+from .screening import ScreeningResult, screening
 
 __all__ = [
     "__version__",
@@ -81,6 +82,7 @@ __all__ = [
     "QpAdmResult",
     "QpAdmRotationResult",
     "QpWaveStats",
+    "ScreeningResult",
     "afs_to_f2_blocks",
     "admixture_date",
     "anygeno_to_afs",
@@ -135,6 +137,7 @@ __all__ = [
     "read_plink",
     "read_snp",
     "stats_to_loo",
+    "screening",
     "tgeno_to_afs",
     "write_f2",
 ]

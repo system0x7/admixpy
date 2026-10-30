@@ -11,6 +11,7 @@ version string. The complete exported callable index follows the method notes.
 
 - [Input conventions](#input-conventions)
 - [Statistics](#statistics)
+- [Exploratory source screening](#exploratory-source-screening)
 - [qpAdm and qpWave](#qpadm-and-qpwave)
 - [Missingness and resampling](#missingness-and-resampling)
 - [Admixture dating](#admixture-dating)
@@ -73,6 +74,90 @@ normal confidence limits. `denominator_z_min=3.0` flags weak denominators;
 sign changes across deletions flag instability. Undefined or unreliable ratios
 retain diagnostics and suppress confidence intervals. `return_blocks=True`
 retains block estimates, deletion ratios, weights, and SNP counts.
+
+## Exploratory source screening
+
+`screening(data, target, candidates, refs, *, outgroup=None, source_sizes=None,
+allsnps=False, covariance_ridge=1e-6, verbose=True, **kwargs)` explores convex mixtures of
+candidate sources in f4 coordinates. It returns `ScreeningResult` with numeric
+`models`, `weights`, and `coordinates` DataFrames plus `settings`.
+
+If `outgroup` is omitted, the first entry of `refs` becomes the outgroup and is
+removed from the reference panel. An explicit outgroup is also removed from
+`refs` when present. The remaining references must be distinct from the target,
+outgroup, and candidates. The target is the left base and the outgroup is the
+right base, matching `qpadm(data, target, sources, [outgroup, *refs])`. By default,
+the function explores 2 through 4 sources, limited by the number of candidates
+and reference contrasts. `source_sizes=[1]` permits single-source screening.
+Each source count must be at most the number of reference contrasts, leaving
+at least one residual coordinate after fitting weights. For a two-source model,
+provide an outgroup plus at least two other references. Four-source screening
+requires an outgroup plus at least four other references.
+
+The function uses qpAdm's shared `qpwave_f4stats` builder to compute
+`f4(source, target; reference, outgroup)` for every candidate and every
+non-outgroup reference, with a full joint covariance. The coordinate table has
+one row per candidate/reference pair; target uncertainty is already included.
+No reference contrast is omitted or replaced with differences against another
+reference.
+The default `allsnps=False` uses a common SNP panel across all these populations
+for direct genotype input. Set `allsnps=True` to calculate each contrast from
+its available SNPs; coordinates may then use different panels. This option
+matches the SNP-availability mode of default genotype qpAdm. With matching
+filters and panels, the contrast estimates and covariance match qpAdm.
+With `allsnps=False`, screening's panel spans all candidates, whereas a
+standalone qpAdm model normally intersects only its selected sources and
+references. The screener also retains its constrained fitting and ridge
+regularization; score and weight agreement is not guaranteed. Precomputed f2
+input supports only `allsnps=False` and follows its existing SNP-panel and
+resampling conventions. An f4 cache can also be supplied; the requested
+`allsnps` setting must match the setting used to build the cache.
+No contrasts are silently dropped on a per-model basis. Nonfinite coordinates,
+missing covariance, and invalid covariance cause an error before model fitting.
+
+For each combination, weights lie in [0, 1] and sum to one. The residual is
+the weighted sum of the source-target contrast rows: `r = w @ X`. Form
+`V = A C A.T`, where `C` is their joint covariance and
+`A = [w1*I, w2*I, ...]`. This includes shared target uncertainty and
+cross-correlations between sources and reference contrasts. Before propagation, add
+`covariance_ridge * mean(diag(C))` to the joint covariance diagonal for that
+model. Two SLSQP starts minimize `r.T @ solve(V, r)`. This is a local numerical
+search, with no guarantee of a global optimum. The score is
+`sqrt(r.T @ solve(V, r) / n_contrasts)`; lower means a closer fit relative to
+uncertainty. `max_abs_z` uses the unregularized propagated marginal variances,
+and `rms_f4` reports the unstandardized residual size.
+
+These scores are descriptive, without calibrated p-values, weight standard
+errors, or acceptance thresholds. More sources and noisier candidates can
+improve scores. Model search also selects favorable fits. Compare within source
+count and validate selected models with qpAdm. No qpAdm or jackknife weight
+refits are performed during screening.
+
+`print(result)` displays five models per source count, with aliases and a source
+key to avoid repeating long population names. `print(result.format(top=10))`
+shows more. Formatting does not change the numeric tables. Models are sorted
+by source count, then increasing score; failed fits remain at the end of their
+group. Model IDs link the tables and follow combination generation order.
+
+| Table | Fields |
+|---|---|
+| `models` | `model`, `n_sources`, full `sources` list, `score`, `rms_f4`, `max_abs_z`, `n_contrasts`, `covariance_rank`, `covariance_condition`, `status`, `message`. |
+| `weights` | One numeric `weight` per `model` and `source`, including zero weights. |
+| `coordinates` | `pop1` through `pop4`, `est`, `se`, and `n` when SNP counts are available. |
+| `settings` | Package version, resolved target/candidate/reference/outgroup panels, `left_base`, `right_base`, source counts, ridge, block count, and forwarded options. |
+
+`status=ok` means the fit completed. `boundary` flags a source weight at or
+below 1e-6. `singular_covariance` flags deficient unregularized residual
+covariance rank. Both flags may occur together. `indistinguishable_sources`,
+`no_uncertainty`, `optimizer_failed`, and `numerical_failure` retain a model row
+with unavailable scores and a message. No weights are reported for failed fits.
+`covariance_rank` uses a relative eigenvalue cutoff of 1e-10 on the raw residual
+covariance; `covariance_condition` describes the regularized residual covariance.
+
+Genotype and filtering options such as `blgsize`, `keepsnps`, `format`, and
+`stream` pass through to `f4_stats`. Screening fixes
+`covariance=True` and the coordinate construction; those internal options
+cannot be overridden. `afprod=True` is unsupported.
 
 ## qpAdm and qpWave
 
@@ -594,6 +679,7 @@ and counts remain numeric; display formatting does not change stored values.
 | `QpAdmResult` | `target`, `left`, `right`, `weights`, `rankdrop`; optional `popdrop`, `f4`, `qpwave`, `weight_cov`. |
 | `QpAdmRotationResult` | `models`, `weights`, `errors`, `settings`. |
 | `F4RatioResult` | `summary`, `components`, `settings`; optional `blocks`. |
+| `ScreeningResult` | `models`, `weights`, `coordinates`, `settings`; `format(top=5)` controls the display. |
 | `AdmixtureDateResult` | `summary`, `parameters`, `curve`, `diagnostics`, `settings`; optional `jackknife`. |
 
 `F2Blocks` methods: `subset(pops=None, pops2=None)`, `pair(pop1, pop2)`,
@@ -793,6 +879,24 @@ f4_ratio(
 ```
 
 Return F4RatioResult for explicit models or combinations of the five population arguments.
+
+#### screening
+
+```python
+screening(
+    data,
+    target,
+    candidates,
+    refs,
+    *,
+    outgroup=None,
+    source_sizes=None,
+    allsnps=False,
+    covariance_ridge=1e-6,
+    verbose=True,
+    **kwargs,
+)
+```
 
 ### Model API
 
@@ -1532,6 +1636,12 @@ F4RatioResult(summary, components, settings, blocks=None)
 ```
 
 Result/container constructor; fields are described under [result objects](#result-objects).
+
+#### ScreeningResult
+
+```python
+ScreeningResult(models, weights, coordinates, settings)
+```
 
 #### QpAdmResult
 

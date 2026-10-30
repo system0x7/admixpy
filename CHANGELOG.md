@@ -2,6 +2,17 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.1.2 - 2026-10-30
+
+- Add `screening` for fast exploratory source-mixture fits using a reusable
+  f4 basis and full joint target/source covariance. Return descriptive scores
+  without model-fit p-values, numeric result tables, and a compact source-key
+  display. When no outgroup is supplied, use the first reference.
+- Allow `screening(allsnps=True)` to use available SNPs per contrast with
+  genotype input; retain the common-panel `allsnps=False` default.
+- Use qpAdm's exact source-target/reference-outgroup contrast basis in
+  `screening`, retaining every reference contrast and its joint covariance.
+
 ## 1.1.1 - 2026-10-30
 
 - Skip target individuals below `min_snps` in `admixture_date`, with warnings
