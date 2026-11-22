@@ -1,4 +1,4 @@
-__version__ = "1.1.2"
+__version__ = "1.2.0"
 
 from .fstats import (
     BlockStats,
@@ -69,6 +69,7 @@ from .genotypes import (
 from .ratios import F4RatioResult, f4_ratio
 from .admixture_date import AdmixtureDateResult, admixture_date
 from .screening import ScreeningResult, screening
+from .pca import PCAModel, PCAResult, pca, read_pca, write_pca
 
 __all__ = [
     "__version__",
@@ -83,6 +84,11 @@ __all__ = [
     "QpAdmRotationResult",
     "QpWaveStats",
     "ScreeningResult",
+    "PCAModel",
+    "PCAResult",
+    "pca",
+    "read_pca",
+    "write_pca",
     "afs_to_f2_blocks",
     "admixture_date",
     "anygeno_to_afs",

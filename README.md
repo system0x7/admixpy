@@ -1,7 +1,7 @@
 # AdmixPy
 
-Fast population-genetic f-statistics, qpAdm, qpWave, and single-pulse admixture dating
-in Python. Requires Python 3.10 or newer.
+Fast population-genetic f-statistics, qpAdm, qpWave, reference PCA with projection,
+and single-pulse admixture dating in Python. Requires Python 3.10 or newer.
 
 For function signatures, options, result objects, and method details, see the
 [API reference](REFERENCE.md). See the [changelog](CHANGELOG.md) for changes.
@@ -67,6 +67,34 @@ A model that is not rejected is not uniquely established as the historical model
 See [qpAdm and qpWave](REFERENCE.md#qpadm-and-qpwave) for rank tests, source
 subsets, rotating models, batching, and result fields.
 
+## PCA and projection
+
+```python
+pca = ap.pca(
+    prefix,
+    pops=["ReferenceA", "ReferenceB", "ReferenceC"],
+    project_pops=["AncientPopulation"],
+    # iids=[...],          # Optional restriction of fitting individuals
+    # project_iids=[...],  # Optional restriction of projected individuals
+    n_components=10,
+    # keepsnps=pruned_snp_ids,
+    # max_snps=100_000,    # Optional reproducible cap, not LD pruning
+)
+pca.scores.to_csv("pca_scores.csv", index=False)
+
+# Reuse the fixed PCA with another genotype dataset.
+ap.write_pca("reference_pca", pca.model)
+model = ap.read_pca("reference_pca")
+projected = ap.pca(other_prefix, model=model, project_pops=["AncientPopulationB"])
+```
+
+Population selectors retain individual observations. Within either role,
+supplying both population labels and IIDs takes their intersection. Projection
+uses observed-SNP least squares with the fitted SNP panel and normalization.
+Results include reference/projected roles and per-individual diagnostics.
+See [PCA and projection](REFERENCE.md#pca-and-projection) for filtering,
+model reuse, coordinate conventions, and memory requirements.
+
 ## Admixture dating
 
 ```python
@@ -120,6 +148,7 @@ See [screening](REFERENCE.md#exploratory-source-screening) for scoring and outpu
 | Relative affinity and ancestry ratios | `f4_proximity`, `f4_ratio` | [Statistics](REFERENCE.md#statistics) |
 | Exploratory source mixtures | `screening` | [Screening](REFERENCE.md#exploratory-source-screening) |
 | Ancestry models and rank tests | `qpadm`, `qpwave`, batch and rotation helpers | [Models](REFERENCE.md#qpadm-and-qpwave) |
+| Reference PCA and projection | `pca`, `read_pca`, `write_pca` | [PCA](REFERENCE.md#pca-and-projection) |
 | Single-pulse dating | `admixture_date` | [Dating](REFERENCE.md#admixture-dating) |
 | Genotype conversion and filtering | Readers, allele-frequency conversion, SNP selection | [Genotypes](REFERENCE.md#genotype-utilities) |
 | Reusable statistics | f2 IO, f4 caches, block and jackknife helpers | [Caches and blocks](REFERENCE.md#caches-and-blocks) |

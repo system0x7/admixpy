@@ -2,6 +2,19 @@
 
 All notable changes to AdmixPy are documented in this file.
 
+## 1.2.0 - 2026-11-19
+
+- Add `pca` for reference genotype PCA, optional projection in the same call,
+  and projection onto a supplied `PCAModel`. Select fitting and projected
+  individuals by population labels and/or IIDs without relabeling them.
+- Add reference-only SNP QC, `keepsnps` panels, reproducible `max_snps` caps,
+  observed-SNP least-squares projection, allele-order harmonization, and
+  optional autoshrink-style correction of reference scores.
+- Add `PCAResult` with pandas score/eigenvalue/diagnostic tables and portable
+  PCA model persistence through `write_pca` and `read_pca`.
+- Share genotype-prefix opening between PCA and streaming allele-frequency
+  conversion. Preserve numeric-looking IDs and labels such as `NA` as strings.
+
 ## 1.1.2 - 2026-10-30
 
 - Add `screening` for fast exploratory source-mixture fits using a reusable

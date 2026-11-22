@@ -180,7 +180,9 @@ class AfData:
 
 
 def _read_table(path: str | Path, names: Sequence[str]) -> pd.DataFrame:
-    return pd.read_csv(path, sep=r"\s+", header=None, names=list(names), comment="#")
+    labels = {name: str for name in names if name in {"iid", "population", "SNP"}}
+    return pd.read_csv(path, sep=r"\s+", header=None, names=list(names), comment="#",
+                       dtype=labels, keep_default_na=False)
 
 
 def read_ind(path: str | Path) -> pd.DataFrame:
@@ -193,6 +195,63 @@ def read_snp(path: str | Path, plink: bool = False) -> pd.DataFrame:
     out["cm"] = pd.to_numeric(out["cm"], errors="coerce")
     out["POS"] = pd.to_numeric(out["POS"], errors="coerce")
     return out
+
+
+@dataclass
+class _GenotypeInput:
+    """Shared individual-genotype access; arrays are SNP-by-individual."""
+
+    ind: pd.DataFrame
+    snp: pd.DataFrame
+    path: Path
+    format: str
+
+    def read(self, first=1, last=None, sample_indices=None):
+        last = len(self.snp) if last is None else last
+        if self.format == "eigenstrat":
+            out = _read_eigenstrat_geno(
+                self.path, len(self.ind), first, last, sample_indices)
+        else:
+            reader = {
+                "plink": _read_plink_bed,
+                "packedancestrymap": _read_packed_geno,
+                "tgeno": _read_tgeno,
+            }[self.format]
+            out = reader(self.path, len(self.snp), len(self.ind), first, last, sample_indices)
+        n_samples = len(self.ind) if sample_indices is None else len(sample_indices)
+        if out.shape != (last - first + 1, n_samples):
+            raise ValueError("Genotype dimensions do not match SNP and individual metadata")
+        return out
+
+    def iter_chunks(self, sample_indices, chunk_size):
+        for start in range(0, len(self.snp), chunk_size):
+            stop = min(start + chunk_size, len(self.snp))
+            yield start, self.read(start + 1, stop, sample_indices)
+
+
+def _open_genotypes(data, format=None):
+    """Resolve a prefix using the same format precedence as the AF readers."""
+    if not isinstance(data, (str, Path)) or Path(data).is_dir():
+        raise ValueError("Individual genotypes require a dataset prefix")
+    pref = str(data)
+    if format is not None:
+        format = format.lower()
+        if format not in {"plink", "eigenstrat", "packedancestrymap", "tgeno"}:
+            raise ValueError("Unsupported genotype format")
+    if format == "plink" or (format is None and all(
+        Path(pref + ext).exists() for ext in (".bed", ".bim", ".fam")
+    )):
+        return _GenotypeInput(
+            _read_table(pref + ".fam", ["population", "iid", "p1", "p2", "sex", "pheno"]),
+            read_snp(pref + ".bim", plink=True), Path(pref + ".bed"), "plink")
+    ind, snp = read_ind(pref + ".ind"), read_snp(pref + ".snp")
+    path = _tgeno_path(pref)
+    # Explicit TGENO also supports legacy headerless individual-major files.
+    detected = ("tgeno" if format == "tgeno" and _parse_geno_header_with_kind(path) is None
+                else detect_geno_format(path, nind=len(ind), nsnp=len(snp)))
+    if format is not None and format != detected:
+        raise ValueError(f"Requested {format} but detected {detected}")
+    return _GenotypeInput(ind, snp, path, detected)
 
 
 def _match_samples(haveinds: Sequence[str], havepops: Sequence[str], inds=None, pops=None):
@@ -686,47 +745,11 @@ def iter_geno_to_afs(
     population matrices. All supported formats use the same sample matching,
     pseudohaploid detection, and allele-count conversion as their full readers.
     """
-    pref = str(pref)
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
-    if format is None:
-        if all(Path(pref + ext).exists() for ext in (".bed", ".bim", ".fam")):
-            format = "plink"
-        elif all(Path(pref + ext).exists() for ext in (".geno", ".snp", ".ind")):
-            ind0 = read_ind(pref + ".ind")
-            snp0 = read_snp(pref + ".snp")
-            format = detect_geno_format(pref + ".geno", nind=len(ind0), nsnp=len(snp0))
-        elif Path(pref + ".tgeno").exists() and all(Path(pref + ext).exists() for ext in (".snp", ".ind")):
-            ind0 = read_ind(pref + ".ind")
-            snp0 = read_snp(pref + ".snp")
-            format = detect_geno_format(pref + ".tgeno", nind=len(ind0), nsnp=len(snp0))
-        else:
-            raise FileNotFoundError("Genotype files not found")
-    format = format.lower()
-
-    if format == "plink":
-        individuals = _read_table(pref + ".fam", ["population", "iid", "p1", "p2", "sex", "pheno"])
-        snp = read_snp(pref + ".bim", plink=True)
-        geno_path = pref + ".bed"
-
-        def read_range(first, last, keep):
-            return _read_plink_bed(geno_path, len(snp), len(individuals), first, last, keep)
-
-    elif format in {"eigenstrat", "packedancestrymap", "tgeno"}:
-        individuals = read_ind(pref + ".ind")
-        snp = read_snp(pref + ".snp")
-        geno_path = _tgeno_path(pref) if format == "tgeno" else pref + ".geno"
-        if format == "eigenstrat":
-            def read_range(first, last, keep):
-                return _read_eigenstrat_geno(geno_path, len(individuals), first, last, keep)
-        elif format == "packedancestrymap":
-            def read_range(first, last, keep):
-                return _read_packed_geno(geno_path, len(snp), len(individuals), first, last, keep)
-        else:
-            def read_range(first, last, keep):
-                return _read_tgeno(geno_path, len(snp), len(individuals), first, last, keep)
-    else:
-        raise ValueError("format must be 'plink', 'eigenstrat', 'packedancestrymap', or 'tgeno'")
+    dataset = _open_genotypes(pref, format)
+    individuals, snp, format = dataset.ind, dataset.snp, dataset.format
+    read_range = dataset.read
 
     indvec, popnames = _match_samples(individuals.iid, individuals.population, inds, pops)
     keep_inds = np.where(indvec >= 0)[0]

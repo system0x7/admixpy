@@ -15,6 +15,7 @@ version string. The complete exported callable index follows the method notes.
 - [qpAdm and qpWave](#qpadm-and-qpwave)
 - [Missingness and resampling](#missingness-and-resampling)
 - [Admixture dating](#admixture-dating)
+- [PCA and projection](#pca-and-projection)
 - [Genotype utilities](#genotype-utilities)
 - [Caches and blocks](#caches-and-blocks)
 - [Result objects](#result-objects)
@@ -587,6 +588,157 @@ length and add that interval to the target sampling age, propagating age and
 model uncertainty separately. The reference population's age does not anchor the
 date. Reference names do not establish where an admixture event occurred.
 
+## PCA and projection
+
+`pca` fits individual-genotype PCA and optionally projects other individuals in
+one call. Supply `model` to project onto an existing PCA without refitting it.
+Only genotype prefixes are accepted; `AfData`, f2 blocks, and f4 caches do not
+contain the individual genotypes required here. All four genotype formats use
+the same readers as the other genotype analyses. No additional dependency is
+required.
+
+```python
+reference = ap.pca(
+    prefix,
+    pops=["ReferenceA", "ReferenceB", "ReferenceC"],
+    project_pops=["AncientA"],
+    n_components=10,
+    keepsnps=pruned_snp_ids,
+    max_snps=100_000,
+    seed=0,
+)
+ap.write_pca("reference_pca", reference.model)
+model = ap.read_pca("reference_pca")
+later = ap.pca(other_prefix, model=model, project_iids=["ancient1", "ancient2"])
+```
+
+### Sample selection and model reuse
+
+`pops` and `iids` select fitting individuals. `project_pops` and `project_iids`
+select projected individuals. Within each role, a population list selects all
+individuals in any listed population, an IID list selects those individuals,
+and supplying both takes the intersection. Original population labels and
+input order within each role are preserved. Result rows contain reference
+individuals first, followed by projected individuals. PCA never averages
+individual genotypes into population observations.
+
+Strings are accepted as single labels or IDs; otherwise supply iterables of
+unique nonempty strings. Unknown names, empty selections, duplicate selected
+IIDs, duplicate SNP IDs, and overlapping fitting/projected selections raise
+errors. IIDs use the new filtering convention, distinct from the legacy
+`inds` plus `pops` relabeling convention in allele-frequency helpers.
+
+With no projection selectors or model, omitted fitting selectors mean fit all
+individuals. Projection requires either explicit fitting selectors or a model;
+other individuals are never projected implicitly. Fitting requires at least
+two individuals and `n_components` cannot exceed the centered matrix rank.
+No automatic outlier removal, population balancing, or relative removal occurs.
+Fitting individuals with no observed calls on the final retained SNP panel
+raise an error rather than receiving an entirely mean-imputed coordinate.
+
+With `model`, projection selectors are required. Fitting selectors and every
+explicit fitting option are rejected, even when explicitly set to their
+normal default. The implementation distinguishes omission using a private
+sentinel; the defaults displayed below apply only when fitting. Projection
+never changes model SNPs, allele frequencies, scales, loadings, eigenvalues,
+or correction factors. Input format, chunk size, allele-mismatch handling,
+and minimum observed SNP count can be configured for the new dataset.
+
+### SNP filtering and numerical conventions
+
+The fitting defaults are `n_components=10`, `keepsnps=None`, `max_snps=None`,
+`seed=0`, `maxmiss=0.05`, `minmaf=0.01`, `auto_only=True`,
+`transitions=True`, `transversions=True`, and `shrinkage="none"`.
+
+- `keepsnps` is an iterable of SNP IDs defining a candidate panel. Absent IDs
+  produce a warning. This panel is intersected with all reference QC filters;
+  unlike `discard_from_aftable`, it does not replace the other filters.
+- `maxmiss` is the maximum fraction of **fitting individuals** missing a call
+  at each SNP. This differs from population-level missingness in f-statistics.
+- `minmaf` is the minimum allele frequency of the less frequent allele among
+  observed reference calls. Monomorphic and entirely missing SNPs are always
+  removed. The MAF and missingness defaults assume relatively complete
+  references; choose thresholds appropriate to your reference data.
+- `auto_only` retains integer chromosomes 1 through 22, accepting `chr` prefixes.
+  Both alleles must be distinct A/C/G/T bases. `transitions=False` retains
+  transversions; `transversions=False` retains transitions.
+- `max_snps` is an optional positive cap after filtering. Uniform sampling
+  without replacement uses `seed` (a nonnegative integer) and restores dataset
+  SNP order. If fewer eligible SNPs remain, all are used. The default is
+  uncapped. This is a computational control, not LD pruning; use an externally
+  pruned `keepsnps` panel to control LD.
+
+Only fitting individuals determine SNP eligibility, frequencies, and scales.
+For A1 dosage `g`, fitting uses `z = (g - 2*p) / sqrt(2*p*(1-p))`, with missing
+reference values replaced by zero after standardization (mean imputation).
+Pseudo-haploid calls stay encoded as 0/2, without automatic ploidy inference or
+allele-count adjustment. Mixing low-coverage pseudo-haploid and diploid samples
+in the fitting set can affect axes; projection onto well-observed references
+is the intended ancient-DNA workflow.
+
+The reference Gram matrix is `Z @ Z.T / n_snps`, with individuals as rows of
+`Z`. Reported eigenvalues use this denominator. Loadings are orthonormal right
+singular vectors, and uncorrected scores are `Z @ loadings` (`U * singular_values`).
+Each component's sign makes its largest absolute loading positive. Explained
+variance ratios divide by the **total** reference Gram-matrix trace, including
+components not returned.
+
+`shrinkage="autoshrink"` enables the autoshrink-style spectral correction
+adapted from adna_pca. It multiplies reference scores by component-specific
+factors in `(0, 1]`, leaving loadings and projected scores unchanged. Factors
+remain one when the spectrum is insufficient or no supported correction is
+found. This is not a claim of full smartpca equivalence. Reported eigenvalues
+and explained variance describe the original fitted matrix.
+
+Projection matches SNP IDs and checks ordered alleles. Reversed allele order
+uses `2-g`; incompatible allele pairs raise an error unless `mismatch="drop"`,
+which drops them with a warning. There is no strand-complement inference or
+coordinate-based matching. Datasets must use compatible variant identities
+and allele/strand conventions; missing model SNPs are allowed.
+
+Each projected individual's coordinates minimize least-squares error using
+only that individual's observed compatible model SNPs, standardized using
+reference frequencies and scales. Streaming QR avoids forming normal equations.
+`min_snps=100` is a configurable minimum observed count, not a guarantee of
+projection precision. Numerical rank is checked independently. Failed rows
+remain with NaN coordinates and statuses `no_observed_snps`,
+`insufficient_snps`, or `rank_deficient`; failures produce a warning. Successful
+rows have status `ok` and expose their rank, condition number, and residual norm.
+
+SNP processing is chunked (`chunk_size=4096`), but fitting allocates a dense
+reference-by-reference Gram matrix: memory is O(n_reference**2), and fitting
+work includes O(n_snps * n_reference**2). A SNP cap reduces work but does not
+remove this reference-count limit. Projection stores only a small QR system
+per selected individual. Model loadings use O(n_snps * n_components) memory.
+
+### PCA results and persistence
+
+`pca` returns `PCAResult` in both modes:
+
+| Field | Contents |
+|---|---|
+| `scores` | `iid`, `population`, `role` (`reference` or `projected`), `PC1`, `PC2`, ...; only individuals processed in this call. |
+| `eigenvalues` | `component`, `eigenvalue`, `explained_variance_ratio`, `shrinkage_factor`, inherited unchanged when applying a model. |
+| `diagnostics` | `iid`, `population`, `role`, `n_snps`, `frac_observed`, `status`; projected rows also expose `rank`, `condition_number`, `residual_norm`. Reference rows have missing projection-only diagnostics in combined results. |
+| `settings` | Mode, input prefix/format, execution options, fitting/projected IIDs for this call, model fitting settings, and projection matching counts. |
+| `model` | A reusable `PCAModel`; projection-only calls retain the supplied object. |
+
+`PCAModel` contains `snps` (SNP metadata with the usual `SNP`, `CHR`, `cm`,
+`POS`, `A1`, `A2` columns), `frequencies`, `scales`, `loadings`, `eigenvalues`,
+`total_variance`, `shrinkage_factors`, and fitting `settings`. `n_components`
+is a property. Settings record reference IDs/population labels, QC options,
+input/eligible/retained SNP counts, software version, and coordinate conventions.
+The SNP table records the exact retained panel and order, including after capping.
+Projection matching counts include `n_query_snps`, `n_model_snps`,
+`n_matched_snps`, `n_allele_flips`, and `n_mismatched_snps`. `frac_observed`
+always divides by the full model SNP count, including missing/incompatible sites.
+
+`write_pca(path, model)` writes a new directory containing `model.npz` and
+`metadata.json`; an existing directory is not overwritten. `read_pca(path)`
+loads and validates that model, using `allow_pickle=False` and checking its
+schema version and array shapes. Models are self-contained; the original
+reference genotype files are not needed for later projection.
+
 ## Genotype utilities
 
 `read_ind` returns `iid`, `sex`, and `population`. `read_snp` returns `SNP`,
@@ -670,6 +822,8 @@ and counts remain numeric; display formatting does not change stored values.
 
 | Type | Main contents |
 |---|---|
+| `PCAModel` | `snps`, `frequencies`, `scales`, `loadings`, `eigenvalues`, `total_variance`, `shrinkage_factors`, `settings`; property `n_components`. |
+| `PCAResult` | `scores`, `eigenvalues`, `diagnostics`, `settings`, `model`. |
 | `AfData` | `afs`, `counts`, `snpfile`, with matching SNP rows. |
 | `F2Blocks` | `data`, `pops1`, `pops2`, `block_lengths`, `stat`; optional `snp_counts`, `fst_num`, `fst_den`. |
 | `BlockStats` | Contrast `rows`, optional statistic-by-block `blocks`/`loo`, `block_lengths`, `stat`, `est`, `cov`, `variances`, `resampling`. |
@@ -1035,6 +1189,53 @@ admixture_date(
 ```
 
 Return AdmixtureDateResult for a single-pulse covariance fit. Requires individual genotypes and a genetic map.
+
+### PCA API
+
+#### pca
+
+```python
+pca(
+    data,
+    *,
+    model=None,
+    pops=None,
+    iids=None,
+    project_pops=None,
+    project_iids=None,
+    n_components=10,
+    keepsnps=None,
+    max_snps=None,
+    seed=0,
+    maxmiss=0.05,
+    minmaf=0.01,
+    auto_only=True,
+    transitions=True,
+    transversions=True,
+    shrinkage="none",
+    mismatch="error",
+    min_snps=100,
+    chunk_size=4096,
+    format=None,
+    verbose=True,
+)
+```
+
+Fitting options use private omission sentinels internally so explicit fitting
+arguments can be rejected in model-application mode. See
+[PCA and projection](#pca-and-projection) for semantics and logical defaults.
+
+#### write_pca
+
+```python
+write_pca(path, model)
+```
+
+#### read_pca
+
+```python
+read_pca(path)
+```
 
 ### Genotype API
 
@@ -1559,6 +1760,19 @@ qpwave_ranktest(qpw, rank, rcond=1e-10, diag=0.0, max_nfev=None)
 Test one rank of a QpWaveStats matrix; return fit statistics, matrices and convergence diagnostics.
 
 ### Result constructors
+
+#### PCAModel
+
+```python
+PCAModel(snps, frequencies, scales, loadings, eigenvalues, total_variance,
+         shrinkage_factors, settings)
+```
+
+#### PCAResult
+
+```python
+PCAResult(scores, eigenvalues, diagnostics, settings, model)
+```
 
 [AfData](#afdata) · [AdmixtureDateResult](#admixturedateresult) · [BlockStats](#blockstats) · [F2Blocks](#f2blocks) · [F4BlockCache](#f4blockcache) · [F4ModelCache](#f4modelcache) · [F4RatioResult](#f4ratioresult) · [QpAdmResult](#qpadmresult) · [QpAdmRotationResult](#qpadmrotationresult) · [QpWaveStats](#qpwavestats)
 
